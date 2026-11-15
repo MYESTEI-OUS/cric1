@@ -21,13 +21,62 @@ from .teams import PITCHES, TEAMS
 
 API_BASE = "https://api.telegram.org/bot{token}/{method}"
 POLL_TIMEOUT = 5
+esc = html.escape
+DIVIDER = "━━━━━━━━━━━━━━━━━━"
 OUTCOME_TEXT = {
-    "wicket": "OUT! The bowler gets the breakthrough.",
-    "dot": "Dot ball.",
-    "one": "1 run.",
-    "two": "2 runs.",
-    "four": "FOUR!",
-    "six": "SIX!",
+    "wicket": "🔴 OUT! The bowler gets the breakthrough.",
+    "dot": "⚪ Dot ball.",
+    "one": "🟢 1 run.",
+    "two": "🟢 2 runs.",
+    "four": "🔵 FOUR!",
+    "six": "🟣 SIX!",
+}
+# Colour dot shown in front of every commentary line.
+OUTCOME_ICON = {
+    "wicket": "🔴",
+    "six": "🟣",
+    "four": "🔵",
+    "dot": "⚪",
+    "one": "🟢",
+    "two": "🟢",
+}
+# Several lines per outcome so the commentary does not repeat. Variant 0 is
+# the original wording; the variant used rotates with the ball number.
+COMMENTARY_TEMPLATES = {
+    "wicket": (
+        "OUT! {bowler} beats {batter}; the batter is gone.",
+        "Cleaned up! {bowler} breaks through and {batter} has to walk back.",
+        "Gone! {batter} falls to a superb delivery from {bowler}.",
+        "Huge wicket! {bowler} strikes and {batter} heads for the pavilion.",
+    ),
+    "six": (
+        "SIX! {batter} launches {bowler} over the ropes.",
+        "Out of the park! {batter} sends {bowler} into the stands.",
+        "Massive hit! {batter} clears the boundary off {bowler}.",
+        "Maximum! {batter} smashes {bowler} high and handsome.",
+    ),
+    "four": (
+        "FOUR! {batter} finds the boundary off {bowler}.",
+        "Cracking shot! {batter} pierces the gap against {bowler}.",
+        "Races away! {batter} times {bowler} perfectly to the fence.",
+        "Beautiful timing from {batter}! {bowler} can only watch it speed to the ropes.",
+    ),
+    "dot": (
+        "{bowler} keeps it tight; {batter} can't score.",
+        "Solid defence from {batter}; {bowler} builds the pressure.",
+        "Beaten! {bowler} nearly gets {batter} with that one.",
+        "Good length from {bowler}; {batter} has to respect it.",
+    ),
+    "one": (
+        "{batter} nudges a single off {bowler}.",
+        "Quick single! {batter} works {bowler} into the gap.",
+        "{batter} rotates the strike off {bowler}.",
+    ),
+    "two": (
+        "{batter} races back for {runs} runs off {bowler}.",
+        "Two more! {batter} pushes {bowler} into the gap and comes back hard.",
+        "Good running! {batter} turns {bowler} around for a couple.",
+    ),
 }
 PITCH_TEXT = {
     "balanced": "Balanced pitch",
@@ -54,6 +103,10 @@ BOWLER_MILESTONES = {
 }
 # Safe limit (Telegram's hard limit is 4096 characters per message)
 SCORECARD_SAFE_LENGTH = 3900
+SIM_MODE_LABEL = {
+    "ball": "🎯 Ball by ball",
+    "over": "⚡ Over by over",
+}
 
 
 def load_dotenv(path: Path = Path(".env")) -> None:
@@ -311,28 +364,51 @@ class TelegramBot:
         ]]
 
     def toss_prompt(self, game: dict) -> str:
+        home = esc(game["captain_names"]["home"])
+        away = esc(game["captain_names"].get("away") or "Opponent")
         return (
-            f"🪙 TOSS TIME!\n"
-            f"{self.mode_badge(game.get('league'))}\n"
-            f"{game['captain_names']['home']} vs {game['captain_names'].get('away') or 'Opponent'}\n\n"
-            f"{game['captain_names']['home']}, call it in the air:"
+            "🪙 <b>TOSS TIME!</b>\n"
+            f"{esc(self.mode_badge(game.get('league')))}\n\n"
+            f"🏠 <b>{home}</b>   🆚   ✈️ <b>{away}</b>\n\n"
+            f"{DIVIDER}\n"
+            "🎙 <i>The captains walk out to the middle...</i>\n\n"
+            f"🪙 <b>{home}</b>, call it in the air!\n"
+            "👇 Heads or Tails?"
         )
 
     def toss_summary(self, game: dict) -> str:
         toss = game.get("toss")
         if not toss:
             return ""
-        winner_name = game["captain_names"][toss["winner"]]
-        text = (
-            f"🪙 {game['captain_names']['home']} called {toss['call'].title()}. "
-            f"It's {toss['result'].title()}!\n"
-            f"🏆 {winner_name} won the toss"
-        )
-        if toss.get("decision"):
-            text += f" and chose to {toss['decision']} first."
+        home = esc(game["captain_names"]["home"])
+        winner_name = esc(game["captain_names"][toss["winner"]])
+        call_ok = toss["call"] == toss["result"]
+        lines = [
+            f"🪙 <b>{home}</b> called <b>{toss['call'].title()}</b>",
+            f"🌀 The coin lands on... <b>{toss['result'].upper()}</b>! {'✅' if call_ok else '❌'}",
+            "",
+        ]
+        decision = toss.get("decision")
+        if decision:
+            icon = "🏏" if decision == "bat" else "🎳"
+            lines.append(
+                f"🏆 <b>{winner_name}</b> won the toss and chose to "
+                f"{icon} <b>{decision.upper()}</b> first."
+            )
         else:
-            text += "."
-        return text
+            lines.append(f"🏆 <b>{winner_name}</b> won the toss!")
+        return "\n".join(lines)
+
+    def toss_decision_prompt(self, game: dict) -> str:
+        winner_name = esc(game["captain_names"][game["toss"]["winner"]])
+        return (
+            f"{self.toss_summary(game)}\n\n"
+            f"{DIVIDER}\n"
+            f"🎙 <b>{winner_name}</b>, it's your call!\n"
+            "🧠 What will you do first?\n\n"
+            "🏏 <b>Bat first</b>   or   🎳 <b>Bowl first</b>\n"
+            "👇 Choose below"
+        )
 
     def apply_toss_decision(self, game: dict, decision: str) -> None:
         toss = game["toss"]
@@ -341,14 +417,103 @@ class TelegramBot:
         loser = "away" if winner == "home" else "home"
         game["first_batting"] = winner if decision == "bat" else loser
         game["stage"] = "home_team"
+        batting_first = game["first_batting"]
+        bowling_first = "away" if batting_first == "home" else "home"
         self.edit(
             game,
             f"{self.toss_summary(game)}\n\n"
-            f"{game['captain_names']['home']}, choose your team "
-            f"({self.league_name(game.get('league'))} mode):",
+            f"{DIVIDER}\n"
+            f"🏏 <b>{esc(game['captain_names'][batting_first])}</b> will bat first\n"
+            f"🎳 <b>{esc(game['captain_names'][bowling_first])}</b> will bowl first\n\n"
+            f"🏠 <b>{esc(game['captain_names']['home'])}</b>, choose your team "
+            f"({esc(self.league_name(game.get('league')))} mode):",
             self.team_keyboard("home", game.get("league")),
+            parse_mode="HTML",
         )
- 
+
+    @staticmethod
+    def ready_prompt() -> str:
+        return (
+            f"\n{DIVIDER}\n"
+            "🎮 <b>Choose how to play:</b>\n\n"
+            "🎯 <b>Ball by ball</b> — pick your style for every delivery\n"
+            "⚡ <b>Over by over</b> — pick once per over; all 6 balls are simulated "
+            "with ball-by-ball commentary\n\n"
+            "▶️ Host, start the match when both captains are ready:"
+        )
+
+    def ready_keyboard(self) -> list:
+        return [
+            [self.button("🎯 Start ball by ball", "start-match")],
+            [self.button("⚡ Start over by over", "start-match-over")],
+        ]
+
+    def lobby_text(self, game: dict) -> str:
+        return (
+            "🏏 <b>MATCH LOBBY</b>\n\n"
+            f"🧢 <b>{esc(game['captain_names']['home'])}</b> is hosting a multiplayer\n"
+            f"{esc(self.mode_badge(game.get('league')))} match.\n\n"
+            f"{DIVIDER}\n"
+            "👥 Another group member should join as away captain:\n"
+            "👇 Tap the button below"
+        )
+
+    def xi_prompt(self, game: dict, side: str, header: str = "") -> str:
+        captain = esc(game["captain_names"][side])
+        badge = esc(self.team_badge(game["teams"][side]))
+        count = len(game["lineups"].get(side, []))
+        return (
+            f"{header}"
+            f"👕 <b>{captain}</b>, select exactly 11 players for {badge}\n"
+            f"✅ <b>({count}/11 selected):</b>"
+        )
+
+    def help_text(self) -> str:
+        return (
+            "🏏 <b>CRICKET SIMULATOR BOT</b>\n"
+            "<i>Toss  •  Pick your XI  •  Play ball by ball</i>\n\n"
+            f"{DIVIDER}\n"
+            "🎮 <b>START A MATCH</b>\n\n"
+            "👥 <b>In a group (2 players)</b>\n"
+            "▫️ /playint  —  🌍 International match\n"
+            "▫️ /newmatch  —  same as /playint\n"
+            "▫️ /playipl  —  🏆 IPL match\n\n"
+            "🤖 <b>Solo vs the bot</b>\n"
+            "▫️ /vsbot  —  🌍 International vs Bot\n"
+            "▫️ /vsbotipl  —  🏆 IPL vs Bot\n\n"
+            f"{DIVIDER}\n"
+            "🛠 <b>DURING A MATCH</b>\n\n"
+            "▫️ /toss  —  🪙 Show the toss\n"
+            "▫️ /refresh  —  🔄 Redraw the live board\n"
+            "▫️ /cancel  —  ❌ Cancel the match (host only)\n\n"
+            f"{DIVIDER}\n"
+            "📡 <b>EXTRAS</b>\n\n"
+            "▫️ /ping  —  🟢 Check the bot is online\n"
+            "▫️ /members  —  👥 Group member count\n"
+            "▫️ /help  —  📖 Show this guide\n\n"
+            f"{DIVIDER}\n"
+            "🗺 <b>MATCH FLOW</b>\n\n"
+            "1️⃣  🪙 <b>Toss</b> — the winner chooses to bat or bowl\n"
+            "2️⃣  👕 Choose the teams\n"
+            "3️⃣  ⏱ Pick the overs (2 / 5 / 10 / 20)\n"
+            "4️⃣  🏟 Pick the pitch\n"
+            "5️⃣  ✅ Select your XI\n"
+            "6️⃣  ▶️ Start: 🎯 ball by ball or ⚡ over by over\n\n"
+            f"{DIVIDER}\n"
+            "🎯 <b>EVERY BALL</b>\n\n"
+            "🏏 <b>Batting captain:</b>\n"
+            "🔥 Aggressive  •  🛡 Defensive  •  🚀 Ultra\n"
+            "🎯 Hit gaps  •  🔄 Rotate strike\n\n"
+            "🎳 <b>Bowling captain:</b>\n"
+            "⚡ Aggressive  •  🛡 Defensive\n"
+            "🌀 Variation  •  🎭 Knuckle ball\n\n"
+            "⚡ <b>Over by over mode:</b> pick your styles once and the bot "
+            "plays all 6 balls with ball-by-ball commentary. The host can switch "
+            "modes any time with the button under the scorecard.\n\n"
+            "🎙 Live commentary, partnerships and milestones:\n"
+            "🔥 50  •  💯 100  •  🤝 partnerships  •  🏆 wicket hauls"
+        )
+
     @staticmethod
     def player_label(user: dict) -> str:
         return user.get("first_name") or user.get("username") or str(user.get("id", "Captain"))
@@ -389,7 +554,7 @@ class TelegramBot:
     ) -> None:
         chat_id = chat["id"]
         if not vs_bot and chat.get("type") not in ("group", "supergroup"):
-            self.reply(chat_id, "Add this bot to a Telegram group to start a multiplayer match.")
+            self.reply(chat_id, "👥 Add this bot to a Telegram group to start a multiplayer match.")
             return
         if not user.get("id"):
             self.reply(chat_id, "I couldn't identify the captain. Please start the match from your own account.")
@@ -416,14 +581,13 @@ class TelegramBot:
         if vs_bot:
             # Single player: straight to the toss.
             game["stage"] = "toss_call"
-            self.edit(game, self.toss_prompt(game), self.toss_call_keyboard())
+            self.edit(game, self.toss_prompt(game), self.toss_call_keyboard(), parse_mode="HTML")
             return
         self.edit(
             game,
-            f"🏏 {game['captain_names']['home']} is hosting a multiplayer "
-            f"{self.mode_badge(game['league'])} match.\n"
-            "Another group member should join as away captain:",
-            [[self.button("Join as away captain", "join")]],
+            self.lobby_text(game),
+            [[self.button("🧢 Join as away captain", "join")]],
+            parse_mode="HTML",
         )
 
     def answer_callback(self, callback_id: str, text: str | None = None) -> None:
@@ -463,62 +627,75 @@ class TelegramBot:
             return
         user = message.get("from") or {}
 
+        busy_text = "⚠️ A match is already in progress.\n\nUse /cancel before starting another."
+
         if command in ("start", "help"):
-            self.reply(
-                chat_id,
-                "Cricket Simulator supports multiplayer and single-player Vs Bot. "
-                "In groups, use /newmatch, /playint or /playipl; for solo games, use /vsbot or /vsbotipl. "
-                "Flow: toss, choose teams, set overs and pitch, pick your XIs, then play ball by ball "
-                "with live milestones and partnerships. "
-                "Use /ping to test uptime, /members to see the group size, and /refresh to redraw the current board. Use /cancel to cancel a lobby or match.",
-            )
+            self.reply(chat_id, self.help_text(), parse_mode="HTML")
         elif command == "ping":
             uptime_seconds = int(time.time() - self.started_at)
             uptime_text = self._format_duration(uptime_seconds)
-            self.reply(chat_id, f"Pong! Bot is online. Uptime: {uptime_text}.")
+            self.reply(
+                chat_id,
+                f"🟢 <b>Pong!</b> Bot is online.\n⏱ Uptime: <b>{esc(uptime_text)}</b>",
+                parse_mode="HTML",
+            )
         elif command == "members":
             try:
                 count = self.api("getChatMembersCount", {"chat_id": chat_id})
             except (RuntimeError, URLError, TimeoutError) as error:
-                self.reply(chat_id, f"I could not fetch group members right now: {error}")
+                self.reply(chat_id, f"⚠️ I could not fetch group members right now: {error}")
                 return
-            self.reply(chat_id, f"Group members: {count}")
+            self.reply(chat_id, f"👥 <b>Group members: {esc(str(count))}</b>", parse_mode="HTML")
         elif command == "refresh":
             game = self.sessions.get(chat_id)
             if not game:
-                self.reply(chat_id, "There is no active match or lobby to refresh.")
+                self.reply(chat_id, "ℹ️ There is no active match or lobby to refresh.")
                 return
             self.refresh_game(game)
+        elif command == "toss":
+            game = self.sessions.get(chat_id)
+            if game and game.get("stage") in ("toss_call", "toss_decision"):
+                self.refresh_game(game)
+            elif game and game.get("toss") and game["toss"].get("decision"):
+                self.reply(chat_id, self.toss_summary(game), parse_mode="HTML")
+            else:
+                self.reply(
+                    chat_id,
+                    "🪙 <b>No toss yet</b>\n\n"
+                    "Start a match with /playint, /playipl, /vsbot or /vsbotipl.\n"
+                    "The toss is the first step — the winner chooses to 🏏 bat or 🎳 bowl.",
+                    parse_mode="HTML",
+                )
         elif command in ("playint", "newmatch"):
             current_game = self.sessions.get(chat_id)
             if current_game and current_game.get("stage") != "complete":
-                self.reply(chat_id, "A match is already in progress. Use /cancel before starting another.")
+                self.reply(chat_id, busy_text)
                 return
             self.create_lobby(chat, user, "international")
         elif command == "playipl":
             current_game = self.sessions.get(chat_id)
             if current_game and current_game.get("stage") != "complete":
-                self.reply(chat_id, "A match is already in progress. Use /cancel before starting another.")
+                self.reply(chat_id, busy_text)
                 return
             self.create_lobby(chat, user, "ipl")
         elif command in ("vsbot", "vsbotipl"):
             current_game = self.sessions.get(chat_id)
             if current_game and current_game.get("stage") != "complete":
-                self.reply(chat_id, "A match is already in progress. Use /cancel before starting another.")
+                self.reply(chat_id, busy_text)
                 return
             league = "ipl" if command == "vsbotipl" else "international"
             self.create_match_lobby(chat, user, league, vs_bot=True)
         elif command == "cancel":
             game = self.sessions.get(chat_id)
             if not game:
-                self.reply(chat_id, "There is no match to cancel.")
+                self.reply(chat_id, "ℹ️ There is no match to cancel.")
             elif game.get("host") != user.get("id"):
-                self.reply(chat_id, "Only the match host can cancel this match.")
+                self.reply(chat_id, "⚠️ Only the match host can cancel this match.")
             else:
                 self.sessions.pop(chat_id, None)
-                self.reply(chat_id, "Match cancelled. Send /playint or /playipl to start another.")
+                self.reply(chat_id, "❌ Match cancelled.\n\nSend /playint or /playipl to start another.")
         else:
-            self.reply(chat_id, "Unknown command. Use /help to see the available commands.")
+            self.reply(chat_id, "❓ Unknown command. Use /help to see the available commands.")
 
     def handle_callback(self, callback: dict) -> None:
         callback_id = callback["id"]
@@ -559,8 +736,11 @@ class TelegramBot:
             self.answer_callback(callback_id)
             self.edit(
                 game,
-                f"✨ {self.mode_badge(league)} selected.\nChoose the {side} team for this roster:",
+                f"✨ <b>{esc(self.mode_badge(league))}</b> selected\n\n"
+                f"{DIVIDER}\n"
+                f"👕 Choose the <b>{side}</b> team for this roster:",
                 self.team_keyboard(side, league),
+                parse_mode="HTML",
             )
             return
         if data == "join":
@@ -580,9 +760,10 @@ class TelegramBot:
             self.answer_callback(callback_id)
             self.edit(
                 game,
-                f"🧢 {game['captain_names']['away']} joined as away captain.\n\n"
+                f"🧢 <b>{esc(game['captain_names']['away'])}</b> joined as away captain!\n\n"
                 + self.toss_prompt(game),
                 self.toss_call_keyboard(),
+                parse_mode="HTML",
             )
             return
 
@@ -598,7 +779,7 @@ class TelegramBot:
         if data.startswith("toss-call:"):
             call = data.partition(":")[2]
             if game["stage"] != "toss_call" or user_id != game["host"]:
-                self.answer_callback(callback_id, "Only the host can call the toss.")
+                self.answer_callback(callback_id, "🪙 Only the host (home captain) can call the toss.")
                 return
             if call not in ("heads", "tails"):
                 self.answer_callback(callback_id, "Call heads or tails.")
@@ -611,11 +792,11 @@ class TelegramBot:
                 self.apply_toss_decision(game, random.choice(["bat", "bowl"]))
                 return
             game["stage"] = "toss_decision"
-            winner_name = game["captain_names"][winner]
             self.edit(
                 game,
-                f"{self.toss_summary(game)}\n\n{winner_name}, choose to bat or bowl first:",
+                self.toss_decision_prompt(game),
                 self.toss_choice_keyboard(),
+                parse_mode="HTML",
             )
             return
 
@@ -626,7 +807,7 @@ class TelegramBot:
                 return
             winner = game["toss"]["winner"]
             if game["captains"][winner] != user_id:
-                self.answer_callback(callback_id, "Only the toss winner can choose.")
+                self.answer_callback(callback_id, "🏆 Only the toss winner can choose to bat or bowl.")
                 return
             if decision not in ("bat", "bowl"):
                 self.answer_callback(callback_id, "Choose to bat or bowl.")
@@ -674,27 +855,34 @@ class TelegramBot:
                     game["stage"] = "overs"
                     self.edit(
                         game,
-                        f"🏠 Your team: {self.team_badge(team_key)}\n"
-                        f"🤖 Opponent: {self.team_badge(away_team)}\n\n"
-                        "Choose the match length:",
+                        f"🏠 <b>Your team:</b> {esc(self.team_badge(team_key))}\n"
+                        f"🤖 <b>Opponent:</b> {esc(self.team_badge(away_team))}\n\n"
+                        f"{DIVIDER}\n"
+                        "⏱ Choose the match length:",
                         self.overs_keyboard(),
+                        parse_mode="HTML",
                     )
                     return
                 game["stage"] = "away_team"
                 self.edit(
                     game,
-                    f"🏠 Home team: {self.team_badge(team_key)} (captain: {game['captain_names']['home']})\n\n"
-                    f"{game['captain_names']['away']}, choose the away team:",
+                    f"🏠 <b>Home team:</b> {esc(self.team_badge(team_key))} "
+                    f"(captain: {esc(game['captain_names']['home'])})\n\n"
+                    f"{DIVIDER}\n"
+                    f"✈️ <b>{esc(game['captain_names']['away'])}</b>, choose the away team:",
                     self.team_keyboard("away", game.get("league")),
+                    parse_mode="HTML",
                 )
             else:
                 game["stage"] = "overs"
                 self.edit(
                     game,
-                    f"🏠 Home: {self.team_badge(game['teams']['home'])}\n"
-                    f"✈️ Away: {self.team_badge(team_key)}\n\n"
-                    "Both teams are set. Host, choose the match length:",
+                    f"🏠 <b>Home:</b> {esc(self.team_badge(game['teams']['home']))}\n"
+                    f"✈️ <b>Away:</b> {esc(self.team_badge(team_key))}\n\n"
+                    f"{DIVIDER}\n"
+                    "⏱ Both teams are set. Host, choose the match length:",
                     self.overs_keyboard(),
+                    parse_mode="HTML",
                 )
             return
 
@@ -711,7 +899,14 @@ class TelegramBot:
                 return
             game["stage"] = "pitch"
             self.answer_callback(callback_id)
-            self.edit(game, "Choose the pitch for this match:", self.pitch_keyboard())
+            self.edit(
+                game,
+                f"⏱ <b>{game['overs_limit']} overs</b> per innings\n\n"
+                f"{DIVIDER}\n"
+                "🏟 Choose the pitch for this match:",
+                self.pitch_keyboard(),
+                parse_mode="HTML",
+            )
             return
 
         # ---------------- Pitch (now BEFORE the XI selection) ----------------
@@ -726,14 +921,18 @@ class TelegramBot:
             game["pitch"] = pitch
             game["stage"] = "home_xi"
             self.answer_callback(callback_id)
-            home_key = game["teams"]["home"]
             self.edit(
                 game,
-                f"🏟 Pitch: {PITCHES[pitch]['name']} • {game['overs_limit']} overs\n\n"
-                f"{game['captain_names']['home']}, select exactly 11 players for "
-                f"{self.team_badge(home_key)} "
-                f"({len(game['lineups'].get('home', []))}/11 selected):",
+                self.xi_prompt(
+                    game,
+                    "home",
+                    header=(
+                        f"🏟 <b>Pitch:</b> {esc(PITCHES[pitch]['name'])}  •  "
+                        f"⏱ <b>{game['overs_limit']} overs</b>\n\n{DIVIDER}\n"
+                    ),
+                ),
                 self.lineup_keyboard(game, "home"),
+                parse_mode="HTML",
             )
             return
 
@@ -765,12 +964,11 @@ class TelegramBot:
                 return
             game["lineups"][side] = self.normalize_lineup(lineup)
             self.answer_callback(callback_id)
-            captain = game["captain_names"][side]
             self.edit(
                 game,
-                f"{captain}, select exactly 11 players for {TEAMS[game['teams'][side]]['name']} "
-                f"({len(game['lineups'][side])}/11 selected):",
+                self.xi_prompt(game, side),
                 self.lineup_keyboard(game, side),
+                parse_mode="HTML",
             )
             return
 
@@ -792,25 +990,26 @@ class TelegramBot:
                 game["stage"] = "away_xi"
                 self.edit(
                     game,
-                    f"{game['captain_names']['away']}, select exactly 11 players for "
-                    f"{self.team_badge(game['teams']['away'])} "
-                    f"({len(game['lineups'].get('away', []))}/11 selected):",
+                    self.xi_prompt(game, "away", header="✅ <b>Home XI confirmed!</b>\n\n"),
                     self.lineup_keyboard(game, "away"),
+                    parse_mode="HTML",
                 )
                 return
             # Vs bot (home confirmed) or away confirmed -> everything is ready.
             game["stage"] = "ready"
             self.edit(
                 game,
-                self.match_preview(game) + "\nHost, start the match when both captains are ready:",
-                [[self.button("Start match", "start-match")]],
+                self.match_preview(game) + self.ready_prompt(),
+                self.ready_keyboard(),
+                parse_mode="HTML",
             )
             return
 
-        if data == "start-match":
+        if data in ("start-match", "start-match-over"):
             if game["stage"] != "ready" or user_id != game["host"]:
                 self.answer_callback(callback_id, "Only the host can start the match.")
                 return
+            game["sim_mode"] = "over" if data == "start-match-over" else "ball"
             self.answer_callback(callback_id)
             game["innings_number"] = 1
             game["batting_side"] = game.get("first_batting", "home")
@@ -829,6 +1028,19 @@ class TelegramBot:
             self.start_innings(game)
             return
 
+        if data.startswith("sim-mode:"):
+            mode = data.partition(":")[2]
+            if game["stage"] != "live" or user_id != game["host"]:
+                self.answer_callback(callback_id, "🎮 Only the host can switch the simulation mode during a live match.")
+                return
+            if mode not in SIM_MODE_LABEL:
+                self.answer_callback(callback_id, "Unknown simulation mode.")
+                return
+            game["sim_mode"] = mode
+            self.answer_callback(callback_id)
+            self.render_scorecard(game)
+            return
+
         if data.startswith("bat:"):
             self.handle_batting_choice(callback_id, game, user_id, data.partition(":")[2])
             return
@@ -843,16 +1055,21 @@ class TelegramBot:
         home_team = TEAMS[home]
         away_team = TEAMS[away]
         lines = [
-            f"🏏 {home_team.get('logo', '🏏')} {home_team['name']} vs {away_team['name']} {away_team.get('logo', '🏏')}",
-            f"Mode: {'Vs Bot • ' if game.get('vs_bot') else ''}{self.mode_badge(game.get('league'))}",
+            f"🏏 <b>{esc(home_team.get('logo', '🏏'))} {esc(home_team['name'])} vs "
+            f"{esc(away_team['name'])} {esc(away_team.get('logo', '🏏'))}</b>",
+            DIVIDER,
+            f"🎮 Mode: {'Vs Bot • ' if game.get('vs_bot') else ''}{esc(self.mode_badge(game.get('league')))}",
         ]
         toss = game.get("toss")
         if toss and toss.get("decision"):
             winner_team = TEAMS[game["teams"][toss["winner"]]]["name"]
-            lines.append(f"🪙 Toss: {winner_team} won and chose to {toss['decision']} first")
-        lines.append(f"{len(game['lineups']['home'])} players selected for each side")
-        lines.append(f"Format: {game['overs_limit']} overs per innings")
-        lines.append(f"Pitch: {PITCHES[game['pitch']]['name']}")
+            icon = "🏏" if toss["decision"] == "bat" else "🎳"
+            lines.append(
+                f"🪙 Toss: <b>{esc(winner_team)}</b> won and chose to {icon} {toss['decision']} first"
+            )
+        lines.append(f"👥 {len(game['lineups']['home'])} players selected for each side")
+        lines.append(f"⏱ Format: <b>{game['overs_limit']} overs</b> per innings")
+        lines.append(f"🏟 Pitch: <b>{esc(PITCHES[game['pitch']]['name'])}</b>")
         return "\n".join(lines) + "\n"
 
     @staticmethod
@@ -935,7 +1152,7 @@ class TelegramBot:
             return
 
         self.answer_callback(callback_id)
-        self.play_delivery(game, style)
+        self.play_turn(game, style)
 
     def ai_batting_style(self, game: dict) -> str:
         match = game["innings"]["match"]
@@ -976,11 +1193,65 @@ class TelegramBot:
             game["batting_style"] = self.ai_batting_style(game)
             game["phase"] = "bowl"
         elif game["phase"] == "bowl" and self.bowling_side(game) == "away":
-            self.play_delivery(game, self.ai_bowling_style(game))
+            self.play_turn(game, self.ai_bowling_style(game))
             return
         self.render_scorecard(game)
 
+    def play_turn(self, game: dict, style: str) -> None:
+        """Play one ball or a whole over depending on the match's simulation mode."""
+        if game.get("sim_mode") == "over":
+            self.play_over(game, style)
+        else:
+            self.play_delivery(game, style)
+
     def play_delivery(self, game: dict, style: str) -> None:
+        self._play_ball(game, style)
+        self._after_turn(game)
+
+    def _after_turn(self, game: dict) -> None:
+        if self.innings_over(game):
+            self.finish_innings(game)
+        else:
+            game["phase"] = "bat"
+            self.advance_vs_bot_turn(game)
+
+    @staticmethod
+    def ball_token(outcome: str, runs: int) -> str:
+        if outcome == "wicket":
+            return "W"
+        return str(runs)
+
+    def play_over(self, game: dict, bowling_style: str) -> None:
+        """Simulate every remaining ball of the current over in one go."""
+        innings = game["innings"]
+        match = innings["match"]
+        score_before = match["score"]
+        wickets_before = match["wickets"]
+        tokens: list[str] = []
+        events: list[str] = []
+        bowler_name = ""
+        for _ in range(6):
+            result = self._play_ball(game, bowling_style)
+            tokens.append(self.ball_token(result["outcome"], result["runs"]))
+            events.extend(result["events"])
+            bowler_name = result["bowler"]
+            if match["balls"] % 6 == 0 or self.innings_over(game):
+                break
+        innings["milestone_alert"] = events
+        # Show only this over's ball-by-ball commentary (plus its end-of-over line).
+        added = len(tokens) + (1 if match["balls"] % 6 == 0 and not is_match_over(match) else 0)
+        innings["commentary"] = innings["commentary"][-added:]
+        over_number = (match["balls"] - 1) // 6 + 1
+        innings["last_over"] = {
+            "number": over_number,
+            "bowler": bowler_name,
+            "runs": match["score"] - score_before,
+            "wickets": match["wickets"] - wickets_before,
+            "balls": tokens,
+        }
+        self._after_turn(game)
+
+    def _play_ball(self, game: dict, style: str) -> dict:
         innings = game["innings"]
         match = innings["match"]
         side = self.bowling_side(game)
@@ -1092,14 +1363,27 @@ class TelegramBot:
                 )
 
         commentary = self.ball_commentary(
-            bowler_name, batter["name"], delivery["outcome"], delivery["runs"]
+            bowler_name,
+            batter["name"],
+            delivery["outcome"],
+            delivery["runs"],
+            variant=match["balls"] - 1,
         )
         innings["last_ball"] = (
             f"{BATTING_STYLES[game['batting_style']]['label']} vs "
             f"{BOWLING_STYLES[style]['label']}: {OUTCOME_TEXT[delivery['outcome']]}"
         )
         innings["commentary"].append({"over": delivery["over"], "text": commentary})
-        del innings["commentary"][:-6]
+        if match["balls"] % 6 == 0 and not is_match_over(match):
+            innings["commentary"].append({
+                "over": format_overs(match["balls"]),
+                "text": (
+                    f"⏱ End of over {match['balls'] // 6}: "
+                    f"{match['score']}/{match['wickets']}  •  "
+                    f"RR {self.run_rate(match['score'], match['balls']):.2f}"
+                ),
+            })
+        del innings["commentary"][: -(8 if game.get("sim_mode") == "over" else 6)]
 
         # Milestone alert for this ball + permanent milestone log.
         innings["milestone_alert"] = events
@@ -1113,27 +1397,25 @@ class TelegramBot:
         else:
             innings["bowler_index"] = current_index
 
-        if self.innings_over(game):
-            self.finish_innings(game)
-        else:
-            game["phase"] = "bat"
-            self.advance_vs_bot_turn(game)
+        return {
+            "outcome": delivery["outcome"],
+            "runs": delivery["runs"],
+            "events": events,
+            "bowler": bowler_name,
+        }
 
     @staticmethod
     def ball_commentary(
-        bowler: str, batter: str, outcome: str, runs: int
+        bowler: str, batter: str, outcome: str, runs: int, variant: int = 0
     ) -> str:
-        if outcome == "wicket":
-            return f"OUT! {bowler} beats {batter}; the batter is gone."
-        if outcome == "six":
-            return f"SIX! {batter} launches {bowler} over the ropes."
-        if outcome == "four":
-            return f"FOUR! {batter} finds the boundary off {bowler}."
-        if outcome == "dot":
-            return f"{bowler} keeps it tight; {batter} can't score."
-        if runs == 1:
-            return f"{batter} nudges a single off {bowler}."
-        return f"{batter} races back for {runs} runs off {bowler}."
+        key = outcome
+        if outcome not in ("wicket", "six", "four", "dot"):
+            key = "one" if runs == 1 else "two"
+        templates = COMMENTARY_TEMPLATES[key]
+        line = templates[variant % len(templates)].format(
+            bowler=bowler, batter=batter, runs=runs
+        )
+        return f"{OUTCOME_ICON.get(outcome, '🟢')} {line}"
 
     @staticmethod
     def match_result_text(game: dict) -> str:
@@ -1255,13 +1537,22 @@ class TelegramBot:
             current_bowler, {"balls": 0, "runs": 0, "wickets": 0}
         )
         current_run_rate = self.run_rate(match["score"], match["balls"])
+        # Traffic-light colour for the score: green = healthy, red = in trouble.
+        if match["wickets"] <= 3:
+            score_icon = "🟢"
+        elif match["wickets"] <= 6:
+            score_icon = "🟡"
+        else:
+            score_icon = "🔴"
 
         lines = [
             f"🏏 <b>{escape(TEAMS[game['teams']['home']]['name'])} vs "
             f"{escape(TEAMS[game['teams']['away']]['name'])}</b>",
+            DIVIDER,
             f"✨ <b>{game['innings_number']}{'st' if game['innings_number'] == 1 else 'nd'} INNINGS</b>"
             f"  •  {escape(team_name)}",
-            f"🟢 <b>Score: {match['score']}/{match['wickets']} "
+            "",
+            f"{score_icon} <b>Score: {match['score']}/{match['wickets']} "
             f"({format_overs(match['balls'])}/{overs} overs)</b>",
             f"📈 <b>Run rate (RR/CRR): {current_run_rate:.2f} runs/over</b>",
         ]
@@ -1272,33 +1563,43 @@ class TelegramBot:
                 runs_needed * 6 / balls_remaining if balls_remaining else 0.0
             )
             lines.append(
-                f"🎯 <b>Target: {game['target']}  •  Need {runs_needed} runs"
-                f"  •  Required RR (RRR): {required_run_rate:.2f}</b>"
+                f"🎯 <b>Target: {game['target']}</b>  •  Need <b>{runs_needed}</b> runs "
+                f"from <b>{balls_remaining}</b> balls"
             )
+            lines.append(f"⚡ <b>Required RR (RRR): {required_run_rate:.2f}</b>")
         for index, result in enumerate(game.get("results", []), start=1):
             lines.append(
                 f"📋 {index}{'st' if index == 1 else 'nd'} innings: "
                 f"{escape(result['team'])} <b>{result['score']}/{result['wickets']}</b> "
                 f"<code>({format_overs(result['balls'])}/{overs} overs)</code>"
             )
+        lines.append("")
         lines.append(f"🏟 Pitch: {escape(PITCHES[game['pitch']]['name'])}")
+        lines.append(f"🎮 Mode: {SIM_MODE_LABEL.get(game.get('sim_mode', 'ball'), SIM_MODE_LABEL['ball'])}")
         toss = game.get("toss")
         if toss and toss.get("decision") and not compact:
             winner_team = TEAMS[game["teams"][toss["winner"]]]["name"]
+            toss_icon = "🏏" if toss["decision"] == "bat" else "🎳"
             lines.append(
-                f"🪙 Toss: {escape(winner_team)} won, chose to {toss['decision']}"
+                f"🪙 Toss: {escape(winner_team)} won, chose to {toss_icon} {toss['decision']}"
             )
 
         # Live milestone banner for the ball just played.
         if game["stage"] == "live":
-            for alert in innings.get("milestone_alert", []):
+            alerts = innings.get("milestone_alert", [])
+            if alerts:
+                lines.append("")
+            for alert in alerts:
                 lines.append(f"🎉 <b>{escape(alert)}</b>")
 
+        lines.append(f"\n{DIVIDER}")
         lines.append(
             f"🏏 <b>Strike:</b> {escape(striker['name'])}* "
-            f"{striker['runs']}({striker['balls']}){self.batter_badge(striker['runs'])} | "
-            f"<b>Non-striker:</b> {escape(non_striker['name'])} "
-            f"{non_striker['runs']}({non_striker['balls']}){self.batter_badge(non_striker['runs'])}"
+            f"<b>{striker['runs']}({striker['balls']})</b>{self.batter_badge(striker['runs'])}"
+        )
+        lines.append(
+            f"🧍 <b>Non-striker:</b> {escape(non_striker['name'])} "
+            f"<b>{non_striker['runs']}({non_striker['balls']})</b>{self.batter_badge(non_striker['runs'])}"
         )
         lines.append(
             f"⚡ <b>Batting SR: {self.batter_strike_rate(striker):.2f} | "
@@ -1308,6 +1609,7 @@ class TelegramBot:
         # Current partnership.
         partnership = innings.get("partnership") or self.new_partnership()
         contrib = partnership.get("contrib", {})
+        lines.append("")
         lines.append(
             f"🤝 <b>Partnership:</b> <b>{partnership['runs']}</b> runs "
             f"({partnership['balls']} balls) "
@@ -1315,25 +1617,42 @@ class TelegramBot:
             f" • {escape(non_striker['name'])} {contrib.get(non_striker['name'], 0)}</code>"
         )
 
+        lines.append("")
         lines.append(
             f"🎳 <b>Current bowler:</b> {escape(current_bowler)} "
             f"<code>{format_overs(bowler_stats['balls'])}-{bowler_stats['runs']}-{bowler_stats['wickets']}</code>"
             f"{self.bowler_badge(bowler_stats['wickets'])} "
             f"(Econ {self.run_rate(bowler_stats['runs'], bowler_stats['balls']):.2f})"
-            f" | <b>Next bowler:</b> {escape(next_bowler)}"
         )
+        lines.append(f"⏭ <b>Next bowler:</b> {escape(next_bowler)}")
         if innings.get("last_wicket"):
             lines.append(f"🧤 Last wicket: {escape(innings['last_wicket'])}")
         if innings.get("last_ball"):
             lines.append(f"💥 Last ball: {escape(innings['last_ball'])}")
+        last_over = innings.get("last_over")
+        if last_over and game.get("sim_mode") == "over" and game["stage"] in ("live", "innings_break", "complete"):
+            lines.append(f"\n{DIVIDER}")
+            lines.append(
+                f"📦 <b>OVER {last_over['number']} SUMMARY</b>  •  🎳 {escape(last_over['bowler'])}"
+            )
+            over_icon = "🔴" if last_over["wickets"] else ("🟢" if last_over["runs"] >= 8 else "⚪")
+            lines.append(
+                f"{over_icon} <b>{last_over['runs']} runs</b>  •  "
+                f"<b>{last_over['wickets']} wkt{'s' if last_over['wickets'] != 1 else ''}</b>"
+            )
+            lines.append("<code>" + "  ".join(last_over["balls"]) + "</code>")
         commentary = innings.get("commentary", [])
         if commentary and not compact:
-            lines.append("\n<b>🎙 BALL-BY-BALL COMMENTARY</b>")
-            lines.extend(
-                f"<code>{escape(item['over'])}</code> {escape(item['text'])}"
-                for item in commentary
-            )
-        lines.append("\n<b>📊 BATTERS</b>  <code>R(B)   4s 6s</code>")
+            lines.append(f"\n{DIVIDER}")
+            lines.append("🎙 <b>BALL-BY-BALL COMMENTARY</b>\n")
+            for position, item in enumerate(commentary):
+                text = escape(item["text"])
+                if position == len(commentary) - 1:
+                    lines.append(f"👉 <code>{escape(item['over'])}</code> <b>{text}</b>")
+                else:
+                    lines.append(f"▫️ <code>{escape(item['over'])}</code> {text}")
+        lines.append(f"\n{DIVIDER}")
+        lines.append("📊 <b>BATTERS</b>  <code>R(B)   4s 6s</code>\n")
         for index, batter in enumerate(innings["batters"]):
             if (
                 batter["balls"] == 0
@@ -1344,15 +1663,21 @@ class TelegramBot:
             marker = "*" if index == innings["striker"] and not batter["out"] else ""
             if batter["out"]:
                 marker = " out"
+                icon = "🔴"
+            elif index == innings["striker"]:
+                icon = "🟢"
+            else:
+                icon = "🔵"
             lines.append(
-                f"{escape(batter['name'])}{marker}  <b>{batter['runs']}({batter['balls']})</b>"
+                f"{icon} {escape(batter['name'])}{marker}  <b>{batter['runs']}({batter['balls']})</b>"
                 f"   {batter['fours']}  {batter['sixes']}{self.batter_badge(batter['runs'])}"
             )
-        lines.append("\n<b>🎯 BOWLING</b>")
+        lines.append(f"\n{DIVIDER}")
+        lines.append("🎯 <b>BOWLING</b>\n")
         if innings["bowlers"]:
             for name, stats in innings["bowlers"].items():
                 lines.append(
-                    f"{escape(name)}: "
+                    f"🎳 {escape(name)}: "
                     f"<code>{format_overs(stats['balls'])}-{stats['runs']}-{stats['wickets']}</code>"
                     f"{self.bowler_badge(stats['wickets'])}"
                 )
@@ -1363,26 +1688,33 @@ class TelegramBot:
             # Completed partnerships for the live / break view.
             partnerships = innings.get("partnerships", [])
             if partnerships:
-                lines.append("\n<b>🤝 PARTNERSHIPS</b>")
+                lines.append(f"\n{DIVIDER}")
+                lines.append("🤝 <b>PARTNERSHIPS</b>\n")
                 for item in partnerships[-10:]:
                     suffix = "*" if item.get("unbroken") else ""
                     lines.append(
-                        f"{self.ordinal(item['wicket'])} wkt: "
+                        f"▫️ {self.ordinal(item['wicket'])} wkt: "
                         f"{escape(item['pair'][0])} &amp; {escape(item['pair'][1])} "
                         f"<b>{item['runs']}{suffix}</b>({item['balls']})"
                     )
             # Milestone log.
             milestones = innings.get("milestones", [])
             if milestones:
-                lines.append("\n<b>🏅 MILESTONES</b>")
+                lines.append(f"\n{DIVIDER}")
+                lines.append("🏅 <b>MILESTONES</b>\n")
                 for item in milestones[-5:]:
-                    lines.append(f"<code>{escape(item['over'])}</code> {escape(item['text'])}")
+                    lines.append(f"▫️ <code>{escape(item['over'])}</code> {escape(item['text'])}")
 
         if game["stage"] == "innings_break":
-            lines.append(f"\nInnings complete: {match['score']}/{match['wickets']}.")
+            lines.append(f"\n{DIVIDER}")
+            lines.append("⏸ <b>INNINGS BREAK</b>\n")
+            lines.append(f"Innings complete: <b>{match['score']}/{match['wickets']}</b>.")
+            lines.append(f"🎯 Target to chase: <b>{match['score'] + 1}</b>")
             lines.append("The other captain will chase.")
         elif final_result:
-            lines.append(f"\n🏁 <b>{escape(final_result)}</b>")
+            lines.append(f"\n{DIVIDER}")
+            lines.append("🏆 <b>MATCH RESULT</b>\n")
+            lines.append(f"🏁 <b>{escape(final_result)}</b>")
             if not compact:
                 # Match-wide highlights from both innings.
                 for number, result in enumerate(game.get("results", []), start=1):
@@ -1401,10 +1733,10 @@ class TelegramBot:
                             f"{'*' if best.get('unbroken') else ''}"
                         )
                     for text in highlights[-6:]:
-                        lines.append(escape(text))
+                        lines.append(f"▫️ {escape(text)}")
             net_run_rates = self.match_net_run_rates(game)
             if net_run_rates is not None:
-                lines.append("\n━━━━━━━━━━━━━━━━━━")
+                lines.append(f"\n{DIVIDER}")
                 lines.append("🏆 <b>MATCH NET RUN RATE (NRR)</b>")
                 home_nrr = net_run_rates["home"]
                 away_nrr = net_run_rates["away"]
@@ -1428,23 +1760,33 @@ class TelegramBot:
                         f"🔴 {escape(self.team_badge(game['teams'][trailing_side]))} "
                         f"<b>{net_run_rates[trailing_side]:+.2f}</b>"
                     )
-                lines.append("━━━━━━━━━━━━━━━━━━")
+                lines.append(DIVIDER)
         elif game["stage"] == "live":
             active_side = game["batting_side"] if game["phase"] == "bat" else self.bowling_side(game)
             role = "Batting" if game["phase"] == "bat" else "Bowling"
+            role_icon = "🏏" if game["phase"] == "bat" else "🎳"
             captain = game["captain_names"][active_side]
-            lines.append(f"\n🎮 <b>{role} captain:</b> {escape(captain)}")
+            lines.append(f"\n{DIVIDER}")
+            lines.append(f"🎮 <b>{role} captain:</b> {escape(captain)}")
+            over_note = " (applies to the whole over)" if game.get("sim_mode") == "over" else ""
             lines.append(
-                "Choose batting approach:" if game["phase"] == "bat" else "Choose bowling style:"
+                f"{role_icon} <b>Choose batting approach:</b>{over_note}"
+                if game["phase"] == "bat"
+                else f"{role_icon} <b>Choose bowling style:</b>{over_note}"
             )
         return "\n".join(lines)
 
     def live_keyboard(self, game: dict) -> list | None:
         if game["stage"] == "innings_break":
-            return [[self.button("Start second innings", "second-innings")]]
+            return [[self.button("▶️ Start second innings", "second-innings")]]
         if game["stage"] != "live":
             return None
-        return self.batting_keyboard() if game["phase"] == "bat" else self.bowling_keyboard()
+        keyboard = self.batting_keyboard() if game["phase"] == "bat" else self.bowling_keyboard()
+        if game.get("sim_mode") == "over":
+            switch = [self.button("🎯 Switch to ball by ball", "sim-mode:ball")]
+        else:
+            switch = [self.button("⚡ Switch to over by over", "sim-mode:over")]
+        return keyboard + [switch]
 
     def render_scorecard(self, game: dict, final_result: str | None = None) -> None:
         text = self.scorecard_text(game, final_result)
@@ -1463,64 +1805,74 @@ class TelegramBot:
         if stage == "join":
             self.edit(
                 game,
-                f"🏏 {game['captain_names']['home']} is hosting a multiplayer "
-                f"{self.mode_badge(game.get('league'))} match.\n"
-                "Another group member should join as away captain:",
-                [[self.button("Join as away captain", "join")]],
+                self.lobby_text(game),
+                [[self.button("🧢 Join as away captain", "join")]],
+                parse_mode="HTML",
             )
             return
         if stage == "toss_call":
-            self.edit(game, self.toss_prompt(game), self.toss_call_keyboard())
+            self.edit(game, self.toss_prompt(game), self.toss_call_keyboard(), parse_mode="HTML")
             return
         if stage == "toss_decision":
-            winner_name = game["captain_names"][game["toss"]["winner"]]
             self.edit(
                 game,
-                f"{self.toss_summary(game)}\n\n{winner_name}, choose to bat or bowl first:",
+                self.toss_decision_prompt(game),
                 self.toss_choice_keyboard(),
+                parse_mode="HTML",
             )
             return
         if stage == "home_team":
             self.edit(
                 game,
-                f"{self.toss_summary(game)}\n\n"
-                f"{game['captain_names']['home']}, choose the home team ({self.league_name(game['league'])} mode):",
+                f"{self.toss_summary(game)}\n\n{DIVIDER}\n"
+                f"🏠 <b>{esc(game['captain_names']['home'])}</b>, choose the home team "
+                f"({esc(self.league_name(game['league']))} mode):",
                 self.team_keyboard("home", game.get("league")),
+                parse_mode="HTML",
             )
             return
         if stage == "away_team":
             self.edit(
                 game,
-                f"🏠 Home team: {self.team_badge(game['teams']['home'])}\n\n"
-                f"{game['captain_names']['away']}, choose the away team:",
+                f"🏠 <b>Home team:</b> {esc(self.team_badge(game['teams']['home']))}\n\n{DIVIDER}\n"
+                f"✈️ <b>{esc(game['captain_names']['away'])}</b>, choose the away team:",
                 self.team_keyboard("away", game.get("league")),
+                parse_mode="HTML",
             )
             return
         if stage == "overs":
-            self.edit(game, "Both teams are set. Host, choose the match length:", self.overs_keyboard())
+            self.edit(
+                game,
+                "⏱ Both teams are set. Host, choose the match length:",
+                self.overs_keyboard(),
+                parse_mode="HTML",
+            )
             return
         if stage == "pitch":
-            self.edit(game, "Choose the pitch for this match:", self.pitch_keyboard())
+            self.edit(game, "🏟 Choose the pitch for this match:", self.pitch_keyboard(), parse_mode="HTML")
             return
         if stage == "home_xi":
             self.edit(
                 game,
-                f"{game['captain_names']['home']}, select exactly 11 players for {self.team_badge(game['teams']['home'])} ({len(game['lineups'].get('home', []))}/11 selected):",
+                self.xi_prompt(game, "home"),
                 self.lineup_keyboard(game, "home"),
+                parse_mode="HTML",
             )
             return
         if stage == "away_xi":
             self.edit(
                 game,
-                f"{game['captain_names']['away']}, select exactly 11 players for {self.team_badge(game['teams']['away'])} ({len(game['lineups'].get('away', []))}/11 selected):",
+                self.xi_prompt(game, "away"),
                 self.lineup_keyboard(game, "away"),
+                parse_mode="HTML",
             )
             return
         if stage == "ready":
             self.edit(
                 game,
-                self.match_preview(game) + "\nHost, start the match when both captains are ready:",
-                [[self.button("Start match", "start-match")]],
+                self.match_preview(game) + self.ready_prompt(),
+                self.ready_keyboard(),
+                parse_mode="HTML",
             )
             return
         if stage in ("live", "innings_break", "complete"):
@@ -1610,11 +1962,33 @@ class TelegramBot:
         finally:
             server.server_close()
 
+    def set_command_menu(self) -> None:
+        commands = [
+            ("playint", "🌍 Start an international match (group)"),
+            ("playipl", "🏆 Start an IPL match (group)"),
+            ("vsbot", "🤖 Play international cricket vs the bot"),
+            ("vsbotipl", "🤖 Play IPL cricket vs the bot"),
+            ("toss", "🪙 Show the toss"),
+            ("refresh", "🔄 Redraw the live board"),
+            ("cancel", "❌ Cancel the match (host only)"),
+            ("ping", "🟢 Check the bot is online"),
+            ("members", "👥 Group member count"),
+            ("help", "📖 How to play"),
+        ]
+        try:
+            self.api(
+                "setMyCommands",
+                {"commands": [{"command": name, "description": text} for name, text in commands]},
+            )
+        except (RuntimeError, URLError, TimeoutError) as error:
+            print(f"Could not register the command menu: {error}", file=sys.stderr)
+
     def run(self) -> None:
         bot_info = self.api("getMe")
         self.username = bot_info.get("username")
         if not self.username:
             raise RuntimeError("Telegram getMe did not return this bot's username.")
+        self.set_command_menu()
         hostname = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
         if hostname:
             self.run_webhook(hostname)
