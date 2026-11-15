@@ -22,6 +22,21 @@ BOWLING_STYLES = {
 BASE_WEIGHTS = {"wicket": 0.05, "dot": 0.30, "one": 0.30, "two": 0.07, "four": 0.15, "six": 0.07}
 
 
+# How strongly the batter-vs-bowler rating gap shifts each outcome's weight.
+# A positive gap (batter rated higher than the bowler) means fewer wickets and
+# dots and more boundaries; a negative gap does the opposite.
+RATING_FACTORS = {"wicket": -0.6, "dot": -0.2, "one": 0.0, "two": 0.1, "four": 0.45, "six": 0.55}
+
+
+def rating_modifiers(batter_rating: int, bowler_rating: int) -> dict:
+    """Outcome multipliers from the batter's batting and the bowler's bowling rating."""
+    gap = max(-1.0, min(1.0, (batter_rating - bowler_rating) / 100))
+    return {
+        outcome: max(0.4, 1.0 + factor * gap)
+        for outcome, factor in RATING_FACTORS.items()
+    }
+
+
 def format_overs(balls: int) -> str:
     return f"{balls // 6}.{balls % 6}"
 
