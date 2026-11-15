@@ -16,8 +16,17 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from .game import BATTING_STYLES, BOWLING_STYLES, create_match, format_overs, is_match_over, simulate_ball
-from .teams import PITCHES, TEAMS
+from .game import (
+    BATTING_STYLES,
+    BOWLING_STYLES,
+    OUTCOMES,
+    create_match,
+    format_overs,
+    is_match_over,
+    rating_modifiers,
+    simulate_ball,
+)
+from .teams import PITCHES, TEAMS, bat_rating, bowl_rating, player_role
 
 API_BASE = "https://api.telegram.org/bot{token}/{method}"
 POLL_TIMEOUT = 5
@@ -103,6 +112,56 @@ BOWLER_MILESTONES = {
 }
 # Safe limit (Telegram's hard limit is 4096 characters per message)
 SCORECARD_SAFE_LENGTH = 3900
+ROLE_ICON = {"BAT": "🏏", "AR": "🔄", "BOWL": "🎳", "WK": "🧤"}
+ROLE_NAME = {
+    "BAT": "Batters",
+    "AR": "All-rounders",
+    "BOWL": "Bowlers",
+    "WK": "Wicketkeepers",
+}
+# XI selector filter modes: callback value -> (button label, role code or None for all)
+XI_FILTERS = {
+    "all": ("🌐 All", None),
+    "bat": ("🏏 BAT", "BAT"),
+    "ar": ("🔄 AR", "AR"),
+    "bowl": ("🎳 BOWL", "BOWL"),
+    "wk": ("🧤 WK", "WK"),
+}
+BOWLER_MODE_LABEL = {
+    "auto": "🤖 Auto rotation",
+    "manual": "🎯 Manual pick",
+}
+# Light-hearted on-field banter. Keep it playful and respectful.
+SLEDGE_LINES = {
+    "wicket": (
+        "Pavilion's that way, mate. Mind the steps!",
+        "Thanks for dropping by. Say hi to the dressing room!",
+        "That's a statement delivery. Off you go!",
+        "Nice knock... for about five minutes.",
+        "Your tea is waiting for you, champ.",
+    ),
+    "six": (
+        "Go fetch that from the stands, will you?",
+        "Is that your best? Bring a bit more pace!",
+        "Enjoy the view from the boundary, mate.",
+        "Somebody tell the bowler it's a cricket ball, not a gift.",
+    ),
+    "four": (
+        "Pick a line and stick to it, mate!",
+        "That one was gone before you finished bowling.",
+        "Is that all you've got today?",
+    ),
+    "dot": (
+        "Feeling the pressure yet? Not a run in sight.",
+        "You can't hit what you can't read, mate.",
+        "Dot, dot, dot... the scoreboard is getting lonely.",
+    ),
+    "keeper": (
+        "Stumps are calling your name, mate.",
+        "Careful with those feet, I'm watching you.",
+        "Did you fall asleep out there? Wake up!",
+    ),
+}
 SIM_MODE_LABEL = {
     "ball": "🎯 Ball by ball",
     "over": "⚡ Over by over",
@@ -305,17 +364,49 @@ class TelegramBot:
                 normalized.append(player_index)
         return sorted(normalized)
 
+    @staticmethod
+    def xi_filter(game: dict, side: str) -> str:
+        value = (game.get("xi_filter") or {}).get(side, "all")
+        return value if value in XI_FILTERS else "all"
+
+    @staticmethod
+    def role_counts(team_key: str, lineup: list[int]) -> dict:
+        players = TEAMS[team_key]["players"]
+        counts = {"BAT": 0, "AR": 0, "BOWL": 0, "WK": 0}
+        for index in lineup:
+            if 0 <= index < len(players):
+                counts[player_role(players[index])] += 1
+        return counts
+
     def lineup_keyboard(self, game: dict, side: str) -> list:
         team = TEAMS[game["teams"][side]]
         selected = self.normalize_lineup(game["lineups"].get(side))
         game["lineups"][side] = selected
-        rows = []
-        for index in range(0, len(team["players"]), 2):
+        active_filter = self.xi_filter(game, side)
+        wanted_role = XI_FILTERS[active_filter][1]
+
+        filter_buttons = [
+            self.button(
+                ("✅ " if key == active_filter else "") + label,
+                f"xi-filter:{side}:{key}",
+            )
+            for key, (label, _) in XI_FILTERS.items()
+        ]
+        rows = [filter_buttons[:3], filter_buttons[3:]]
+
+        visible = [
+            index for index, player in enumerate(team["players"])
+            if wanted_role is None or player_role(player) == wanted_role
+        ]
+        for start in range(0, len(visible), 2):
             row = []
-            for player_index in range(index, min(index + 2, len(team["players"]))):
+            for player_index in visible[start:start + 2]:
                 player = team["players"][player_index]
                 mark = "✅ " if player_index in selected else ""
-                row.append(self.button(f"{mark}{player}", f"xi:{side}:{player_index}"))
+                row.append(self.button(
+                    f"{mark}{ROLE_ICON[player_role(player)]} {player}",
+                    f"xi:{side}:{player_index}",
+                ))
             rows.append(row)
         rows.append([self.button(
             f"Confirm XI ({len(selected)}/11)",
@@ -432,21 +523,220 @@ class TelegramBot:
         )
 
     @staticmethod
-    def ready_prompt() -> str:
+    def ready_prompt(game: dict | None = None) -> str:
+        bowler_mode = BOWLER_MODE_LABEL[(game or {}).get("bowler_mode", "auto")]
         return (
             f"\n{DIVIDER}\n"
             "🎮 <b>Choose how to play:</b>\n\n"
             "🎯 <b>Ball by ball</b> — pick your style for every delivery\n"
             "⚡ <b>Over by over</b> — pick once per over; all 6 balls are simulated "
             "with ball-by-ball commentary\n\n"
+            f"🎳 <b>Bowlers:</b> {bowler_mode}\n"
+            "   🤖 Auto: bowlers rotate every over\n"
+            "   🎯 Manual: the bowling captain picks who bowls each over\n\n"
             "▶️ Host, start the match when both captains are ready:"
         )
 
-    def ready_keyboard(self) -> list:
+    def ready_keyboard(self, game: dict | None = None) -> list:
         return [
             [self.button("🎯 Start ball by ball", "start-match")],
             [self.button("⚡ Start over by over", "start-match-over")],
+            [self.bowler_mode_button(game)],
         ]
+
+    def bowler_mode_button(self, game: dict | None) -> dict:
+        if (game or {}).get("bowler_mode") == "manual":
+            return self.button("🎳 Bowlers: 🎯 Manual (tap for 🤖 Auto)", "bowler-mode:auto")
+        return self.button("🎳 Bowlers: 🤖 Auto (tap for 🎯 Manual)", "bowler-mode:manual")
+
+    # ------------------------------------------------------------------
+    # Ratings, bowler selection and sledging helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def xi_ratings(team_key: str, lineup: list[int]) -> tuple[int, int]:
+        """(average batting rating of the XI, average of its best five bowling ratings)."""
+        players = TEAMS[team_key]["players"]
+        names = [players[index] for index in lineup if 0 <= index < len(players)]
+        if not names:
+            return 0, 0
+        batting = round(sum(bat_rating(name) for name in names) / len(names))
+        bowling_scores = sorted(
+            (bowl_rating(name) for name in names if player_role(name) in ("BOWL", "AR")),
+            reverse=True,
+        )[:5]
+        bowling = round(sum(bowling_scores) / len(bowling_scores)) if bowling_scores else 0
+        return batting, bowling
+
+    @staticmethod
+    def match_modifiers(game: dict, batter_name: str, bowler_name: str) -> dict:
+        """Pitch effect multiplied by the batter-vs-bowler rating effect."""
+        pitch = PITCHES[game["pitch"]]["modifiers"]
+        ratings = rating_modifiers(bat_rating(batter_name), bowl_rating(bowler_name))
+        return {outcome: pitch.get(outcome, 1.0) * ratings[outcome] for outcome in OUTCOMES}
+
+    @staticmethod
+    def bowler_quota(game: dict) -> int:
+        """Maximum overs per bowler (T20 style: a fifth of the innings)."""
+        options = max(1, len(game["innings"].get("bowler_rotation") or []))
+        overs = game["overs_limit"]
+        return max(1, -(-overs // 5), -(-overs // options))
+
+    @staticmethod
+    def overs_bowled(innings: dict, name: str) -> int:
+        balls = innings["bowlers"].get(name, {}).get("balls", 0)
+        return (balls + 5) // 6
+
+    def current_bowler_name(self, game: dict) -> str:
+        innings = game["innings"]
+        if innings.get("manual_bowler"):
+            return innings["manual_bowler"]
+        rotation = innings.get("bowler_rotation") or []
+        if not rotation:
+            return innings.get("last_bowler") or "To be assigned"
+        return rotation[innings.get("bowler_index", 0) % len(rotation)]
+
+    def eligible_bowlers(self, game: dict) -> list[tuple[int, str]]:
+        """Bowlers the captain may pick: not last over's bowler, still within quota."""
+        innings = game["innings"]
+        rotation = innings.get("bowler_rotation") or []
+        quota = self.bowler_quota(game)
+        last = innings.get("last_over_bowler")
+        eligible = [
+            (index, name) for index, name in enumerate(rotation)
+            if name != last and self.overs_bowled(innings, name) < quota
+        ]
+        if not eligible:
+            eligible = [
+                (index, name) for index, name in enumerate(rotation)
+                if self.overs_bowled(innings, name) < quota
+            ]
+        return eligible or list(enumerate(rotation))
+
+    def next_phase(self, game: dict) -> str:
+        innings = game["innings"]
+        if (
+            game.get("bowler_mode") == "manual"
+            and innings["match"]["balls"] % 6 == 0
+            and not innings.get("manual_bowler")
+        ):
+            return "pick_bowler"
+        return "bat"
+
+    def ai_pick_bowler(self, game: dict) -> str:
+        eligible = self.eligible_bowlers(game)
+        names = [name for _, name in eligible]
+        weights = [bowl_rating(name) ** 2 for name in names]
+        return random.choices(names, weights=weights, k=1)[0]
+
+    def bowler_keyboard(self, game: dict) -> list:
+        innings = game["innings"]
+        quota = self.bowler_quota(game)
+        buttons = [
+            self.button(
+                f"🎳 {name} ⭐{bowl_rating(name)} ({self.overs_bowled(innings, name)}/{quota})",
+                f"pick-bowler:{index}",
+            )
+            for index, name in self.eligible_bowlers(game)
+        ]
+        return [buttons[start:start + 2] for start in range(0, len(buttons), 2)]
+
+    def bowler_pick_text(self, game: dict) -> list[str]:
+        innings = game["innings"]
+        quota = self.bowler_quota(game)
+        over_number = innings["match"]["balls"] // 6 + 1
+        available = {name for _, name in self.eligible_bowlers(game)}
+        unavailable = []
+        for name in innings.get("bowler_rotation") or []:
+            if name in available:
+                continue
+            if name == innings.get("last_over_bowler"):
+                unavailable.append(f"{esc(name)} (bowled last over)")
+            else:
+                unavailable.append(f"{esc(name)} ({quota}/{quota} overs)")
+        lines = [
+            f"🎳 <b>Choose the bowler for over {over_number}:</b>",
+            f"⭐ = bowling rating  •  (overs bowled/{quota} max)",
+        ]
+        if unavailable:
+            lines.append("🚫 Resting: " + ", ".join(unavailable))
+        return lines
+
+    def fielding_keeper(self, game: dict) -> str | None:
+        side = self.bowling_side(game)
+        players = TEAMS[game["teams"][side]]["players"]
+        for index in game["lineups"][side]:
+            if player_role(players[index]) == "WK":
+                return players[index]
+        return None
+
+    def add_sledge(self, game: dict, outcome: str, bowler: str, batter: str, over_label: str) -> None:
+        """Maybe add a short, playful sledge for the ball just played."""
+        if not game.get("sledging", True):
+            return
+        innings = game["innings"]
+        streak = innings.get("dot_streak", 0) + 1 if outcome == "dot" else 0
+        innings["dot_streak"] = streak
+        kind, chance = None, 0.0
+        if outcome == "wicket":
+            kind, chance = "wicket", 0.9
+        elif outcome == "six":
+            kind, chance = "six", 0.7
+        elif outcome == "four":
+            kind, chance = "four", 0.35
+        elif outcome == "dot" and streak >= 2:
+            kind, chance = "dot", 0.6
+        if kind is None or random.random() >= chance:
+            return
+        speaker, target = (batter, bowler) if kind in ("six", "four") else (bowler, batter)
+        if kind == "dot":
+            keeper = self.fielding_keeper(game)
+            if keeper and random.random() < 0.4:
+                kind, speaker = "keeper", keeper
+        innings.setdefault("sledges", []).append({
+            "over": over_label,
+            "from": speaker,
+            "to": target,
+            "text": random.choice(SLEDGE_LINES[kind]),
+        })
+        del innings["sledges"][: -(4 if game.get("sim_mode") == "over" else 2)]
+
+    def handle_bowler_pick(self, callback_id: str, game: dict, user_id: int, index_text: str) -> None:
+        if game.get("stage") != "live" or game.get("phase") != "pick_bowler":
+            self.answer_callback(callback_id, "No bowler needs to be picked right now.")
+            return
+        if game["captains"][self.bowling_side(game)] != user_id:
+            self.answer_callback(callback_id, "🎳 Only the bowling captain can pick the bowler.")
+            return
+        eligible = dict(self.eligible_bowlers(game))
+        try:
+            index = int(index_text)
+        except ValueError:
+            index = -1
+        if index not in eligible:
+            self.answer_callback(callback_id, "That bowler is not available this over.")
+            return
+        game["innings"]["manual_bowler"] = eligible[index]
+        game["phase"] = "bat"
+        self.answer_callback(callback_id)
+        self.advance_vs_bot_turn(game)
+
+    @staticmethod
+    def auto_xi(team_key: str) -> list[int]:
+        """Role-balanced XI for the bot: 1 WK, 4 BOWL, 2 AR, 4 BAT where possible."""
+        players = TEAMS[team_key]["players"]
+        pools = {"WK": [], "BOWL": [], "AR": [], "BAT": []}
+        for index, name in enumerate(players):
+            pools[player_role(name)].append(index)
+        for pool in pools.values():
+            random.shuffle(pool)
+        chosen: list[int] = []
+        for role, quota in (("WK", 1), ("BOWL", 4), ("AR", 2), ("BAT", 4)):
+            chosen.extend(pools[role][:quota])
+            del pools[role][:quota]
+        leftovers = [index for pool in pools.values() for index in pool]
+        random.shuffle(leftovers)
+        chosen.extend(leftovers[: 11 - len(chosen)])
+        return sorted(chosen[:11])
 
     def lobby_text(self, game: dict) -> str:
         return (
@@ -458,15 +748,56 @@ class TelegramBot:
             "👇 Tap the button below"
         )
 
+    def xi_composition(self, game: dict, side: str) -> str:
+        lineup = self.normalize_lineup(game["lineups"].get(side))
+        counts = self.role_counts(game["teams"][side], lineup)
+        return (
+            f"🧮 <b>Your XI:</b> 🏏 {counts['BAT']} BAT  •  🔄 {counts['AR']} AR  •  "
+            f"🎳 {counts['BOWL']} BOWL  •  🧤 {counts['WK']} WK"
+        )
+
+    def xi_rating_line(self, game: dict, side: str) -> list[str]:
+        lineup = self.normalize_lineup(game["lineups"].get(side))
+        if not lineup:
+            return []
+        batting, bowling = self.xi_ratings(game["teams"][side], lineup)
+        return [f"⭐ <b>XI rating:</b> 🏏 Bat {batting}  •  🎳 Bowl {bowling}"]
+
+    def xi_tips(self, game: dict, side: str) -> list[str]:
+        lineup = self.normalize_lineup(game["lineups"].get(side))
+        if len(lineup) != 11:
+            return []
+        counts = self.role_counts(game["teams"][side], lineup)
+        tips = []
+        if counts["WK"] == 0:
+            tips.append("⚠️ No wicketkeeper in this XI — tap 🧤 WK to add one.")
+        if counts["BOWL"] + counts["AR"] < 5:
+            tips.append(
+                f"⚠️ Only {counts['BOWL'] + counts['AR']} bowling options (BOWL + AR). "
+                "Five or more is safer for a full match."
+            )
+        return tips
+
     def xi_prompt(self, game: dict, side: str, header: str = "") -> str:
         captain = esc(game["captain_names"][side])
         badge = esc(self.team_badge(game["teams"][side]))
         count = len(game["lineups"].get(side, []))
-        return (
+        active_filter = self.xi_filter(game, side)
+        role = XI_FILTERS[active_filter][1]
+        showing = "🌐 All players" if role is None else f"{ROLE_ICON[role]} {ROLE_NAME[role]} only"
+        lines = [
             f"{header}"
             f"👕 <b>{captain}</b>, select exactly 11 players for {badge}\n"
-            f"✅ <b>({count}/11 selected):</b>"
-        )
+            f"✅ <b>({count}/11 selected):</b>",
+            "",
+            self.xi_composition(game, side),
+            *self.xi_rating_line(game, side),
+            f"🔎 Showing: <b>{showing}</b>",
+            "🏏 BAT  •  🔄 AR (all-rounder)  •  🎳 BOWL  •  🧤 WK",
+        ]
+        for tip in self.xi_tips(game, side):
+            lines.append(tip)
+        return "\n".join(lines)
 
     def help_text(self) -> str:
         return (
@@ -484,6 +815,7 @@ class TelegramBot:
             f"{DIVIDER}\n"
             "🛠 <b>DURING A MATCH</b>\n\n"
             "▫️ /toss  —  🪙 Show the toss\n"
+            "▫️ /sledge  —  🗣 Sledging on/off (host)\n"
             "▫️ /refresh  —  🔄 Redraw the live board\n"
             "▫️ /cancel  —  ❌ Cancel the match (host only)\n\n"
             f"{DIVIDER}\n"
@@ -499,6 +831,27 @@ class TelegramBot:
             "4️⃣  🏟 Pick the pitch\n"
             "5️⃣  ✅ Select your XI\n"
             "6️⃣  ▶️ Start: 🎯 ball by ball or ⚡ over by over\n\n"
+            f"{DIVIDER}\n"
+            "🧢 <b>PLAYER ROLES (International + IPL)</b>\n\n"
+            "🏏 BAT — batter    🔄 AR — all-rounder\n"
+            "🎳 BOWL — bowler    🧤 WK — wicketkeeper\n\n"
+            "While picking your XI, tap the filter buttons "
+            "(🌐 All / 🏏 BAT / 🔄 AR / 🎳 BOWL / 🧤 WK) to browse each role. "
+            "Your ticked players stay ticked, and the XI counter shows your balance. "
+            "Only 🎳 BOWL and 🔄 AR players bowl in the match.\n\n"
+            f"{DIVIDER}\n"
+            "⭐ <b>RATINGS</b>\n\n"
+            "Every player has a separate 🏏 batting and 🎳 bowling rating (1-99). "
+            "A strong batter against a weak bowler scores faster and gets out less; "
+            "a star bowler against a weak batter takes more wickets. "
+            "You see ⭐ ratings on the scorecard and the XI rating when picking your team.\n\n"
+            "🎳 <b>BOWLER MODE</b>\n\n"
+            "🤖 <b>Auto</b> — bowlers rotate every over\n"
+            "🎯 <b>Manual</b> — the bowling captain picks each over's bowler "
+            "(no back-to-back overs, max overs per bowler apply)\n"
+            "The host can switch with the 🎳 Bowlers button.\n\n"
+            "🗣 <b>SLEDGING</b> — playful on-field banter after wickets, sixes and "
+            "dot-ball streaks. Host can use /sledge to turn it on or off.\n\n"
             f"{DIVIDER}\n"
             "🎯 <b>EVERY BALL</b>\n\n"
             "🏏 <b>Batting captain:</b>\n"
@@ -652,6 +1005,16 @@ class TelegramBot:
                 self.reply(chat_id, "ℹ️ There is no active match or lobby to refresh.")
                 return
             self.refresh_game(game)
+        elif command == "sledge":
+            game = self.sessions.get(chat_id)
+            if not game:
+                self.reply(chat_id, "ℹ️ Start a match first, then use /sledge to switch the banter on or off.")
+            elif game.get("host") != user.get("id"):
+                self.reply(chat_id, "⚠️ Only the match host can switch sledging on or off.")
+            else:
+                game["sledging"] = not game.get("sledging", True)
+                state = "ON 🗣" if game["sledging"] else "OFF 🤐"
+                self.reply(chat_id, f"🗣 Sledging is now <b>{state}</b>", parse_mode="HTML")
         elif command == "toss":
             game = self.sessions.get(chat_id)
             if game and game.get("stage") in ("toss_call", "toss_decision"):
@@ -849,9 +1212,7 @@ class TelegramBot:
                         return
                     away_team = random.choice(candidates)
                     game["teams"]["away"] = away_team
-                    game["lineups"]["away"] = sorted(
-                        random.sample(range(len(TEAMS[away_team]["players"])), 11)
-                    )
+                    game["lineups"]["away"] = self.auto_xi(away_team)
                     game["stage"] = "overs"
                     self.edit(
                         game,
@@ -972,6 +1333,27 @@ class TelegramBot:
             )
             return
 
+        if data.startswith("xi-filter:"):
+            _, side, mode = data.split(":", 2)
+            if side not in ("home", "away") or game["stage"] != f"{side}_xi":
+                self.answer_callback(callback_id, "That lineup selection is no longer active.")
+                return
+            if game["captains"][side] != user_id:
+                self.answer_callback(callback_id, "Only that side's captain can use the role filter.")
+                return
+            if mode not in XI_FILTERS:
+                self.answer_callback(callback_id, "Unknown role filter.")
+                return
+            game.setdefault("xi_filter", {})[side] = mode
+            self.answer_callback(callback_id)
+            self.edit(
+                game,
+                self.xi_prompt(game, side),
+                self.lineup_keyboard(game, side),
+                parse_mode="HTML",
+            )
+            return
+
         if data.startswith("xi-confirm:"):
             side = data.partition(":")[2]
             if side not in ("home", "away") or game["stage"] != f"{side}_xi":
@@ -999,8 +1381,8 @@ class TelegramBot:
             game["stage"] = "ready"
             self.edit(
                 game,
-                self.match_preview(game) + self.ready_prompt(),
-                self.ready_keyboard(),
+                self.match_preview(game) + self.ready_prompt(game),
+                self.ready_keyboard(game),
                 parse_mode="HTML",
             )
             return
@@ -1026,6 +1408,36 @@ class TelegramBot:
             game["batting_side"] = "away" if game["batting_side"] == "home" else "home"
             game["target"] = game["results"][0]["score"] + 1
             self.start_innings(game)
+            return
+
+        if data.startswith("bowler-mode:"):
+            mode = data.partition(":")[2]
+            if user_id != game["host"] or game["stage"] not in ("ready", "live"):
+                self.answer_callback(callback_id, "🎳 Only the host can change the bowler mode, before or during the match.")
+                return
+            if mode not in BOWLER_MODE_LABEL:
+                self.answer_callback(callback_id, "Unknown bowler mode.")
+                return
+            game["bowler_mode"] = mode
+            self.answer_callback(callback_id)
+            if game["stage"] == "live":
+                innings = game["innings"]
+                if mode == "auto" and game.get("phase") == "pick_bowler":
+                    game["phase"] = "bat"
+                elif (
+                    mode == "manual"
+                    and game.get("phase") == "bat"
+                    and innings["match"]["balls"] % 6 == 0
+                    and not innings.get("manual_bowler")
+                ):
+                    game["phase"] = "pick_bowler"
+                self.advance_vs_bot_turn(game)
+            else:
+                self.refresh_game(game)
+            return
+
+        if data.startswith("pick-bowler:"):
+            self.handle_bowler_pick(callback_id, game, user_id, data.partition(":")[2])
             return
 
         if data.startswith("sim-mode:"):
@@ -1068,6 +1480,18 @@ class TelegramBot:
                 f"🪙 Toss: <b>{esc(winner_team)}</b> won and chose to {icon} {toss['decision']} first"
             )
         lines.append(f"👥 {len(game['lineups']['home'])} players selected for each side")
+        for side, icon in (("home", "🏠"), ("away", "✈️")):
+            counts = self.role_counts(game["teams"][side], game["lineups"][side])
+            lines.append(
+                f"{icon} XI: 🏏 {counts['BAT']}  🔄 {counts['AR']}  "
+                f"🎳 {counts['BOWL']}  🧤 {counts['WK']}"
+            )
+        for side, icon in (("home", "🏠"), ("away", "✈️")):
+            batting, bowling = self.xi_ratings(game["teams"][side], game["lineups"][side])
+            lines.append(
+                f"⭐ {icon} {esc(TEAMS[game['teams'][side]]['name'])}: "
+                f"🏏 Bat <b>{batting}</b>  •  🎳 Bowl <b>{bowling}</b>"
+            )
         lines.append(f"⏱ Format: <b>{game['overs_limit']} overs</b> per innings")
         lines.append(f"🏟 Pitch: <b>{esc(PITCHES[game['pitch']]['name'])}</b>")
         return "\n".join(lines) + "\n"
@@ -1090,6 +1514,10 @@ class TelegramBot:
             "non_striker": 1,
             "bowler_rotation": [],
             "bowler_index": 0,
+            "manual_bowler": None,
+            "last_over_bowler": None,
+            "dot_streak": 0,
+            "sledges": [],
             "last_wicket": None,
             "commentary": [],
             "partnership": {"runs": 0, "balls": 0, "contrib": {}},
@@ -1106,11 +1534,16 @@ class TelegramBot:
         bowling_side = self.bowling_side(game)
         bowling_team_key = game["teams"][bowling_side]
         bowling_xi = [TEAMS[bowling_team_key]["players"][index] for index in game["lineups"][bowling_side]]
-        game["innings"]["bowler_rotation"] = bowling_xi
+        # Only bowlers and all-rounders bowl (falls back to everyone for odd XIs).
+        bowling_options = [
+            name for name in bowling_xi if player_role(name) in ("BOWL", "AR")
+        ]
+        rotation = bowling_options if len(bowling_options) >= 3 else bowling_xi
+        game["innings"]["bowler_rotation"] = rotation
         game["innings"]["bowler_index"] = 0
-        game["innings"]["last_bowler"] = bowling_xi[0]
+        game["innings"]["last_bowler"] = rotation[0]
         game["stage"] = "live"
-        game["phase"] = "bat"
+        game["phase"] = self.next_phase(game)
         self.advance_vs_bot_turn(game)
 
     def batting_side_name(self, game: dict) -> str:
@@ -1125,6 +1558,9 @@ class TelegramBot:
         )
 
     def handle_batting_choice(self, callback_id: str, game: dict, user_id: int, style: str) -> None:
+        if game.get("stage") == "live" and game.get("phase") == "pick_bowler":
+            self.answer_callback(callback_id, "🎳 Wait: the bowling captain is picking the bowler.")
+            return
         if game.get("stage") != "live" or game.get("phase") != "bat":
             self.answer_callback(callback_id, "Wait for the batting captain's turn.")
             return
@@ -1189,6 +1625,9 @@ class TelegramBot:
         if game.get("stage") != "live" or not game.get("vs_bot"):
             self.render_scorecard(game)
             return
+        if game["phase"] == "pick_bowler" and self.bowling_side(game) == "away":
+            game["innings"]["manual_bowler"] = self.ai_pick_bowler(game)
+            game["phase"] = "bat"
         if game["phase"] == "bat" and game["batting_side"] == "away":
             game["batting_style"] = self.ai_batting_style(game)
             game["phase"] = "bowl"
@@ -1212,7 +1651,7 @@ class TelegramBot:
         if self.innings_over(game):
             self.finish_innings(game)
         else:
-            game["phase"] = "bat"
+            game["phase"] = self.next_phase(game)
             self.advance_vs_bot_turn(game)
 
     @staticmethod
@@ -1259,7 +1698,8 @@ class TelegramBot:
         bowler_xi = [bowler_team[index] for index in game["lineups"][side]]
         rotation = innings.get("bowler_rotation") or bowler_xi
         current_index = innings.get("bowler_index", 0) % len(rotation)
-        bowler_name = rotation[current_index]
+        bowler_name = self.current_bowler_name(game)
+        striker_name = innings["batters"][innings["striker"]]["name"]
 
         # Make sure older saved matches have the new tracking fields.
         innings.setdefault("partnership", self.new_partnership())
@@ -1273,7 +1713,7 @@ class TelegramBot:
             match,
             game["batting_style"],
             style,
-            PITCHES[game["pitch"]]["modifiers"],
+            self.match_modifiers(game, striker_name, bowler_name),
         )
 
         events: list[str] = []
@@ -1384,6 +1824,7 @@ class TelegramBot:
                 ),
             })
         del innings["commentary"][: -(8 if game.get("sim_mode") == "over" else 6)]
+        self.add_sledge(game, delivery["outcome"], bowler_name, batter["name"], delivery["over"])
 
         # Milestone alert for this ball + permanent milestone log.
         innings["milestone_alert"] = events
@@ -1394,6 +1835,8 @@ class TelegramBot:
         innings["last_bowler"] = bowler_name
         if match["balls"] % 6 == 0:
             innings["bowler_index"] = (innings.get("bowler_index", 0) + 1) % len(rotation)
+            innings["manual_bowler"] = None
+            innings["last_over_bowler"] = bowler_name
         else:
             innings["bowler_index"] = current_index
 
@@ -1531,7 +1974,8 @@ class TelegramBot:
         non_striker = innings["batters"][innings["non_striker"]]
         rotation = innings.get("bowler_rotation") or []
         current_index = innings.get("bowler_index", 0) % len(rotation) if rotation else 0
-        current_bowler = rotation[current_index] if rotation else innings.get("last_bowler") or "To be assigned"
+        pick_pending = game["stage"] == "live" and game.get("phase") == "pick_bowler"
+        current_bowler = self.current_bowler_name(game)
         next_bowler = rotation[(current_index + 1) % len(rotation)] if rotation else "To be assigned"
         bowler_stats = innings["bowlers"].get(
             current_bowler, {"balls": 0, "runs": 0, "wickets": 0}
@@ -1596,10 +2040,12 @@ class TelegramBot:
         lines.append(
             f"🏏 <b>Strike:</b> {escape(striker['name'])}* "
             f"<b>{striker['runs']}({striker['balls']})</b>{self.batter_badge(striker['runs'])}"
+            f" ⭐{bat_rating(striker['name'])}"
         )
         lines.append(
             f"🧍 <b>Non-striker:</b> {escape(non_striker['name'])} "
             f"<b>{non_striker['runs']}({non_striker['balls']})</b>{self.batter_badge(non_striker['runs'])}"
+            f" ⭐{bat_rating(non_striker['name'])}"
         )
         lines.append(
             f"⚡ <b>Batting SR: {self.batter_strike_rate(striker):.2f} | "
@@ -1618,13 +2064,20 @@ class TelegramBot:
         )
 
         lines.append("")
-        lines.append(
-            f"🎳 <b>Current bowler:</b> {escape(current_bowler)} "
-            f"<code>{format_overs(bowler_stats['balls'])}-{bowler_stats['runs']}-{bowler_stats['wickets']}</code>"
-            f"{self.bowler_badge(bowler_stats['wickets'])} "
-            f"(Econ {self.run_rate(bowler_stats['runs'], bowler_stats['balls']):.2f})"
-        )
-        lines.append(f"⏭ <b>Next bowler:</b> {escape(next_bowler)}")
+        if pick_pending:
+            lines.append("🎳 <b>Current bowler:</b> ⏳ waiting for the bowling captain's pick")
+        else:
+            lines.append(
+                f"🎳 <b>Current bowler:</b> {escape(current_bowler)} "
+                f"<code>{format_overs(bowler_stats['balls'])}-{bowler_stats['runs']}-{bowler_stats['wickets']}</code>"
+                f"{self.bowler_badge(bowler_stats['wickets'])} "
+                f"(Econ {self.run_rate(bowler_stats['runs'], bowler_stats['balls']):.2f})"
+                f" ⭐{bowl_rating(current_bowler)}"
+            )
+        if game.get("bowler_mode") == "manual":
+            lines.append("⏭ <b>Next bowler:</b> picked by the bowling captain each over")
+        else:
+            lines.append(f"⏭ <b>Next bowler:</b> {escape(next_bowler)}")
         if innings.get("last_wicket"):
             lines.append(f"🧤 Last wicket: {escape(innings['last_wicket'])}")
         if innings.get("last_ball"):
@@ -1651,6 +2104,15 @@ class TelegramBot:
                     lines.append(f"👉 <code>{escape(item['over'])}</code> <b>{text}</b>")
                 else:
                     lines.append(f"▫️ <code>{escape(item['over'])}</code> {text}")
+        sledges = innings.get("sledges", [])
+        if sledges and game.get("sledging", True) and not compact:
+            lines.append(f"\n{DIVIDER}")
+            lines.append("🗣 <b>SLEDGING</b>\n")
+            for item in sledges:
+                lines.append(
+                    f"🗣 <b>{escape(item['from'])}</b> → {escape(item['to'])}: "
+                    f"<i>“{escape(item['text'])}”</i>"
+                )
         lines.append(f"\n{DIVIDER}")
         lines.append("📊 <b>BATTERS</b>  <code>R(B)   4s 6s</code>\n")
         for index, batter in enumerate(innings["batters"]):
@@ -1769,11 +2231,14 @@ class TelegramBot:
             lines.append(f"\n{DIVIDER}")
             lines.append(f"🎮 <b>{role} captain:</b> {escape(captain)}")
             over_note = " (applies to the whole over)" if game.get("sim_mode") == "over" else ""
-            lines.append(
-                f"{role_icon} <b>Choose batting approach:</b>{over_note}"
-                if game["phase"] == "bat"
-                else f"{role_icon} <b>Choose bowling style:</b>{over_note}"
-            )
+            if game["phase"] == "pick_bowler":
+                lines.extend(self.bowler_pick_text(game))
+            else:
+                lines.append(
+                    f"{role_icon} <b>Choose batting approach:</b>{over_note}"
+                    if game["phase"] == "bat"
+                    else f"{role_icon} <b>Choose bowling style:</b>{over_note}"
+                )
         return "\n".join(lines)
 
     def live_keyboard(self, game: dict) -> list | None:
@@ -1781,12 +2246,17 @@ class TelegramBot:
             return [[self.button("▶️ Start second innings", "second-innings")]]
         if game["stage"] != "live":
             return None
-        keyboard = self.batting_keyboard() if game["phase"] == "bat" else self.bowling_keyboard()
+        if game["phase"] == "pick_bowler":
+            keyboard = self.bowler_keyboard(game)
+        elif game["phase"] == "bat":
+            keyboard = self.batting_keyboard()
+        else:
+            keyboard = self.bowling_keyboard()
         if game.get("sim_mode") == "over":
             switch = [self.button("🎯 Switch to ball by ball", "sim-mode:ball")]
         else:
             switch = [self.button("⚡ Switch to over by over", "sim-mode:over")]
-        return keyboard + [switch]
+        return keyboard + [switch, [self.bowler_mode_button(game)]]
 
     def render_scorecard(self, game: dict, final_result: str | None = None) -> None:
         text = self.scorecard_text(game, final_result)
@@ -1870,8 +2340,8 @@ class TelegramBot:
         if stage == "ready":
             self.edit(
                 game,
-                self.match_preview(game) + self.ready_prompt(),
-                self.ready_keyboard(),
+                self.match_preview(game) + self.ready_prompt(game),
+                self.ready_keyboard(game),
                 parse_mode="HTML",
             )
             return
@@ -1969,6 +2439,7 @@ class TelegramBot:
             ("vsbot", "🤖 Play international cricket vs the bot"),
             ("vsbotipl", "🤖 Play IPL cricket vs the bot"),
             ("toss", "🪙 Show the toss"),
+            ("sledge", "🗣 Turn sledging on or off (host)"),
             ("refresh", "🔄 Redraw the live board"),
             ("cancel", "❌ Cancel the match (host only)"),
             ("ping", "🟢 Check the bot is online"),
