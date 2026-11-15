@@ -673,5 +673,317 @@ class TelegramBotTests(unittest.TestCase):
         self.assertNotIn("🥇 Best NRR:", text)
 
 
+    # ------------------------------------------------------------------
+    # Toss, help and commentary
+    # ------------------------------------------------------------------
+    def open_group_toss(self):
+        self.bot.create_lobby(
+            {"id": -100, "type": "supergroup"},
+            {"id": 1, "first_name": "Home captain"},
+        )
+        self.callback("join", user_id=2, first_name="Away captain")
+
+    def test_toss_winner_chooses_bat_or_bowl_when_host_wins(self):
+        self.open_group_toss()
+        with patch("src.bot.random.choice", return_value="heads"):
+            self.callback("toss-call:heads", user_id=1)
+        game = self.bot.sessions[-100]
+        text = self.api_calls[-1][1]["text"]
+        self.assertEqual(game["stage"], "toss_decision")
+        self.assertEqual(game["toss"]["winner"], "home")
+        self.assertIn("won the toss", text)
+        self.assertIn("Home captain", text)
+        self.assertIn("Bat first", text)
+        self.assertEqual(self.api_calls[-1][1]["parse_mode"], "HTML")
+        buttons = str(self.api_calls[-1][1]["reply_markup"])
+        self.assertIn("toss-choice:bat", buttons)
+        self.assertIn("toss-choice:bowl", buttons)
+
+        # The loser cannot decide; the winner can.
+        self.callback("toss-choice:bowl", user_id=2)
+        self.assertEqual(game["stage"], "toss_decision")
+        self.callback("toss-choice:bowl", user_id=1)
+        self.assertEqual(game["stage"], "home_team")
+        self.assertEqual(game["first_batting"], "away")
+        self.assertIn("chose to", self.api_calls[-1][1]["text"])
+        self.assertIn("will bowl first", self.api_calls[-1][1]["text"])
+
+    def test_toss_winner_chooses_bat_or_bowl_when_away_captain_wins(self):
+        self.open_group_toss()
+        with patch("src.bot.random.choice", return_value="tails"):
+            self.callback("toss-call:heads", user_id=1)
+        game = self.bot.sessions[-100]
+        self.assertEqual(game["toss"]["winner"], "away")
+        self.assertIn("Away captain", self.api_calls[-1][1]["text"])
+
+        # Only the away captain (toss winner) can choose.
+        self.callback("toss-choice:bat", user_id=1)
+        self.assertEqual(game["stage"], "toss_decision")
+        self.callback("toss-choice:bat", user_id=2)
+        self.assertEqual(game["first_batting"], "away")
+        self.assertEqual(game["stage"], "home_team")
+
+    def test_only_host_can_call_the_toss(self):
+        self.open_group_toss()
+        self.callback("toss-call:heads", user_id=2)
+        self.assertEqual(self.bot.sessions[-100]["stage"], "toss_call")
+        self.assertIn("Only the host", self.api_calls[-1][1]["text"])
+
+    def test_toss_command_redraws_toss_and_explains_when_no_match(self):
+        self.bot.handle_message({
+            "chat": {"id": -100, "type": "supergroup"},
+            "from": {"id": 1},
+            "text": "/toss",
+        })
+        self.assertIn("No toss yet", self.api_calls[-1][1]["text"])
+
+        self.open_group_toss()
+        self.bot.handle_message({
+            "chat": {"id": -100, "type": "supergroup"},
+            "from": {"id": 1},
+            "text": "/toss",
+        })
+        self.assertEqual(self.api_calls[-1][0], "editMessageText")
+        self.assertIn("TOSS TIME", self.api_calls[-1][1]["text"])
+
+        with patch("src.bot.random.choice", return_value="heads"):
+            self.callback("toss-call:heads", user_id=1)
+        self.bot.handle_message({
+            "chat": {"id": -100, "type": "supergroup"},
+            "from": {"id": 1},
+            "text": "/toss",
+        })
+        self.assertIn("won the toss", self.api_calls[-1][1]["text"])
+
+    def test_toss_screens_escape_captain_names(self):
+        self.bot.create_lobby(
+            {"id": -100, "type": "supergroup"},
+            {"id": 1, "first_name": "<Home & Co>"},
+        )
+        self.callback("join", user_id=2, first_name="Away")
+        self.assertIn("&lt;Home &amp; Co&gt;", self.api_calls[-1][1]["text"])
+
+    def test_vs_bot_toss_always_lets_the_winner_decide(self):
+        self.bot.handle_message({
+            "chat": {"id": 12, "type": "private"},
+            "from": {"id": 1, "first_name": "Solo player"},
+            "text": "/vsbot",
+        })
+        with patch("src.bot.random.choice", return_value="heads"):
+            self.callback("toss-call:heads", user_id=1, chat_id=12)
+        self.assertEqual(self.bot.sessions[12]["stage"], "toss_decision")
+        self.assertIn("Solo player", self.api_calls[-1][1]["text"])
+
+        self.bot.handle_message({
+            "chat": {"id": 13, "type": "private"},
+            "from": {"id": 1, "first_name": "Solo player"},
+            "text": "/vsbot",
+        })
+        with patch("src.bot.random.choice", side_effect=["tails", "bowl"]):
+            self.callback("toss-call:heads", user_id=1, chat_id=13)
+        game = self.bot.sessions[13]
+        self.assertEqual(game["toss"]["winner"], "away")
+        self.assertEqual(game["toss"]["decision"], "bowl")
+        self.assertEqual(game["first_batting"], "home")
+        self.assertIn("Cricket AI", self.api_calls[-1][1]["text"])
+
+    def test_help_is_formatted_and_lists_every_command(self):
+        self.bot.handle_message({
+            "chat": {"id": -100, "type": "supergroup"},
+            "from": {"id": 1},
+            "text": "/help",
+        })
+        text = self.api_calls[-1][1]["text"]
+        self.assertEqual(self.api_calls[-1][1]["parse_mode"], "HTML")
+        for command in (
+            "/playint", "/newmatch", "/playipl", "/vsbot", "/vsbotipl",
+            "/toss", "/refresh", "/cancel", "/ping", "/members", "/help",
+        ):
+            self.assertIn(command, text)
+        self.assertIn("MATCH FLOW", text)
+        self.assertLess(len(text), 4096)
+
+    def test_ball_commentary_has_colour_variety_and_names(self):
+        for outcome, runs in (
+            ("wicket", 0), ("six", 6), ("four", 4), ("dot", 0), ("one", 1), ("two", 2),
+        ):
+            lines = {
+                self.bot.ball_commentary("Bumrah", "Smith", outcome, runs, variant=index)
+                for index in range(4)
+            }
+            self.assertGreater(len(lines), 1)
+            for line in lines:
+                self.assertIn("Bumrah", line)
+                self.assertIn("Smith", line)
+        self.assertTrue(
+            self.bot.ball_commentary("A", "B", "wicket", 0).startswith("🔴")
+        )
+        self.assertTrue(
+            self.bot.ball_commentary("A", "B", "four", 4).startswith("🔵")
+        )
+
+    def test_end_of_over_commentary_and_long_innings_fit_in_one_message(self):
+        self.create_ready_match()
+
+        def fake_dot(match, batting_style, bowling_style, pitch_modifiers):
+            match["balls"] += 1
+            return {"outcome": "dot", "runs": 0, "over": f"{(match['balls'] - 1) // 6}.{(match['balls'] - 1) % 6 + 1}"}
+
+        with patch("src.bot.simulate_ball", side_effect=fake_dot):
+            for _ in range(6):
+                self.callback("bat:defensive", user_id=1)
+                self.callback("bowl:defensive", user_id=2)
+        text = self.api_calls[-1][1]["text"]
+        self.assertIn("End of over 1", text)
+        self.assertLess(len(text), 4096)
+
+
+    # ------------------------------------------------------------------
+    # Over-by-over simulation
+    # ------------------------------------------------------------------
+    def create_ready_match_stage_only(self):
+        """Like create_ready_match but stops on the ready screen."""
+        self.start_group_match_at_home_team()
+        self.callback("team:home:india", user_id=1)
+        self.callback("team:away:australia", user_id=2)
+        self.callback("overs:2", user_id=1)
+        self.callback("pitch:green", user_id=1)
+        for index in range(11):
+            self.callback(f"xi:home:{index}", user_id=1)
+        self.callback("xi-confirm:home", user_id=1)
+        for index in range(11):
+            self.callback(f"xi:away:{index}", user_id=2)
+        self.callback("xi-confirm:away", user_id=2)
+
+    @staticmethod
+    def fake_ball_factory(outcome, runs):
+        def fake_ball(match, batting_style, bowling_style, pitch_modifiers):
+            match["balls"] += 1
+            match["score"] += runs
+            if outcome == "wicket":
+                match["wickets"] += 1
+            ball = match["balls"] - 1
+            return {"outcome": outcome, "runs": runs, "over": f"{ball // 6}.{ball % 6 + 1}"}
+        return fake_ball
+
+    def test_ready_screen_offers_ball_by_ball_and_over_by_over(self):
+        self.create_ready_match_stage_only()
+        game = self.bot.sessions[-100]
+        self.assertEqual(game["stage"], "ready")
+        buttons = str(self.api_calls[-1][1]["reply_markup"])
+        self.assertIn("start-match'", buttons)
+        self.assertIn("start-match-over", buttons)
+        self.assertIn("Over by over", self.api_calls[-1][1]["text"])
+
+    def test_over_by_over_plays_a_whole_over_with_ball_by_ball_commentary(self):
+        self.create_ready_match_stage_only()
+        self.callback("start-match-over", user_id=1)
+        game = self.bot.sessions[-100]
+        self.assertEqual(game["sim_mode"], "over")
+        self.assertIn("applies to the whole over", self.api_calls[-1][1]["text"])
+
+        self.callback("bat:aggressive", user_id=1)
+        self.assertEqual(game["innings"]["match"]["balls"], 0)
+        with patch("src.bot.simulate_ball", side_effect=self.fake_ball_factory("four", 4)):
+            self.callback("bowl:variation", user_id=2)
+
+        innings = game["innings"]
+        text = self.api_calls[-1][1]["text"]
+        self.assertEqual(innings["match"]["balls"], 6)
+        self.assertEqual(innings["match"]["score"], 24)
+        self.assertEqual(game["phase"], "bat")
+        self.assertEqual(innings["last_over"]["runs"], 24)
+        self.assertEqual(innings["last_over"]["balls"], ["4"] * 6)
+        self.assertIn("OVER 1 SUMMARY", text)
+        self.assertIn("BALL-BY-BALL COMMENTARY", text)
+        self.assertGreaterEqual(text.count("🔵 "), 6)  # one blue dot per four
+        self.assertIn("End of over 1", text)
+        self.assertIn("Score: 24/0 (1.0/2 overs)", text)
+        self.assertIn("Over by over", text)
+
+    def test_over_by_over_shows_wickets_and_stops_when_innings_ends(self):
+        self.create_ready_match_stage_only()
+        self.callback("start-match-over", user_id=1)
+        game = self.bot.sessions[-100]
+        self.callback("bat:aggressive", user_id=1)
+        with patch("src.bot.simulate_ball", side_effect=self.fake_ball_factory("wicket", 0)):
+            self.callback("bowl:aggressive", user_id=2)
+        self.assertEqual(game["innings"]["match"]["wickets"], 6)
+        self.assertEqual(game["innings"]["last_over"]["balls"], ["W"] * 6)
+        self.assertIn("6 wkts", self.api_calls[-1][1]["text"])
+
+        # Second over: the innings ends when 10 wickets have fallen (4 more balls).
+        self.callback("bat:aggressive", user_id=1)
+        with patch("src.bot.simulate_ball", side_effect=self.fake_ball_factory("wicket", 0)):
+            self.callback("bowl:aggressive", user_id=2)
+        self.assertEqual(game["innings"]["match"]["wickets"], 10)
+        self.assertEqual(game["innings"]["match"]["balls"], 10)
+        self.assertEqual(game["stage"], "innings_break")
+
+    def test_over_by_over_stops_mid_over_when_chase_is_complete(self):
+        self.create_ready_match_stage_only()
+        self.callback("start-match-over", user_id=1)
+        game = self.bot.sessions[-100]
+        game["innings_number"] = 2
+        game["target"] = 5
+        game["results"] = [{
+            "side": "away", "team": "Australia", "score": 4, "wickets": 0,
+            "balls": 6, "milestones": [], "best_partnership": None,
+        }]
+        self.callback("bat:aggressive", user_id=1)
+        with patch("src.bot.simulate_ball", side_effect=self.fake_ball_factory("four", 4)):
+            self.callback("bowl:aggressive", user_id=2)
+        self.assertEqual(game["innings"]["match"]["balls"], 2)
+        self.assertEqual(game["stage"], "complete")
+        self.assertIn("win by 10 wickets", self.api_calls[-1][1]["text"])
+
+    def test_host_can_switch_between_ball_and_over_mode_mid_match(self):
+        self.create_ready_match()
+        game = self.bot.sessions[-100]
+        self.assertEqual(game["sim_mode"], "ball")
+        self.assertIn("sim-mode:over", str(self.api_calls[-1][1]["reply_markup"]))
+
+        self.callback("sim-mode:over", user_id=2)
+        self.assertEqual(game["sim_mode"], "ball")
+        self.assertIn("Only the host", self.api_calls[-1][1]["text"])
+
+        self.callback("sim-mode:over", user_id=1)
+        self.assertEqual(game["sim_mode"], "over")
+        self.assertIn("sim-mode:ball", str(self.api_calls[-1][1]["reply_markup"]))
+        self.callback("sim-mode:ball", user_id=1)
+        self.assertEqual(game["sim_mode"], "ball")
+
+    def test_over_by_over_works_against_the_bot(self):
+        self.start_vs_bot_at_home_team()
+        game = self.bot.sessions[12]
+        self.callback("team:home:india", user_id=1, chat_id=12)
+        self.callback("overs:2", user_id=1, chat_id=12)
+        self.callback("pitch:green", user_id=1, chat_id=12)
+        for index in range(11):
+            self.callback(f"xi:home:{index}", user_id=1, chat_id=12)
+        self.callback("xi-confirm:home", user_id=1, chat_id=12)
+        self.callback("start-match-over", user_id=1, chat_id=12)
+        self.assertEqual(game["sim_mode"], "over")
+
+        # Home bats first; picking the batting style makes the bot bowl the whole over.
+        self.callback("bat:rotate", user_id=1, chat_id=12)
+        self.assertEqual(game["innings"]["match"]["balls"], 6)
+        self.assertEqual(game["phase"], "bat")
+        self.assertIn("OVER 1 SUMMARY", self.api_calls[-1][1]["text"])
+
+    def test_full_over_by_over_innings_fits_telegram_limit(self):
+        self.create_ready_match_stage_only()
+        self.callback("start-match-over", user_id=1)
+        game = self.bot.sessions[-100]
+        game["overs_limit"] = 20
+        game["innings"]["match"]["overs_limit"] = 20
+        for _ in range(19):
+            self.callback("bat:aggressive", user_id=1)
+            with patch("src.bot.simulate_ball", side_effect=self.fake_ball_factory("six", 6)):
+                self.callback("bowl:variation", user_id=2)
+            self.assertLess(len(self.api_calls[-1][1]["text"]), 4096)
+        self.assertEqual(game["innings"]["match"]["balls"], 114)
+
+
 if __name__ == "__main__":
     unittest.main()
