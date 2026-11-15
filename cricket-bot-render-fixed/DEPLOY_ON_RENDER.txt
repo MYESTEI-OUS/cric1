@@ -1,0 +1,32 @@
+CRICKET BOT - UPDATE INSTRUCTIONS
+
+This ZIP contains the complete project and its matching tests.
+The included test suite was run with:
+  python -m unittest discover -s test -v
+Result: 37 tests passed.
+
+IMPORTANT: Upload the CONTENTS of this ZIP to the ROOT of your existing GitHub repository,
+not as a nested folder. Replace the existing files when GitHub asks.
+
+Required root layout:
+  README.md
+  render.yaml
+  requirements.txt
+  DEPLOY_ON_RENDER.txt
+  src/__init__.py
+  src/bot.py
+  src/game.py
+  src/teams.py
+  test/test_bot.py
+  test/test_game.py
+
+Then commit the changes to the SAME branch that Render deploys (usually main).
+In Render, confirm TELEGRAM_BOT_TOKEN exists under Environment, then use
+Manual Deploy -> Deploy latest commit.
+
+Do not put your Telegram bot token in any source file or commit it to GitHub.
+
+Render settings (Settings tab):
+  Build Command: pip install -r requirements.txt
+  Start Command: python -m src.bot
+  Environment variable: TELEGRAM_BOT_TOKEN = your BotFather token
