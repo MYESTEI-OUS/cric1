@@ -41,14 +41,57 @@ def format_overs(balls: int) -> str:
     return f"{balls // 6}.{balls % 6}"
 
 
-def create_match(overs_limit: int) -> dict:
+def create_match(overs_limit: int, max_wickets: int = 10) -> dict:
     if isinstance(overs_limit, bool) or not isinstance(overs_limit, int) or not 1 <= overs_limit <= 20:
         raise ValueError("Overs must be a whole number from 1 to 20.")
-    return {"overs_limit": overs_limit, "balls": 0, "score": 0, "wickets": 0}
+    match = {"overs_limit": overs_limit, "balls": 0, "score": 0, "wickets": 0}
+    if max_wickets != 10:
+        # Only stored when it differs (a Super Over ends after 2 wickets).
+        match["max_wickets"] = max_wickets
+    return match
 
 
 def is_match_over(match: dict) -> bool:
-    return match["wickets"] >= 10 or match["balls"] >= match["overs_limit"] * 6
+    return (
+        match["wickets"] >= match.get("max_wickets", 10)
+        or match["balls"] >= match["overs_limit"] * 6
+    )
+
+
+# ---------------------------------------------------------------------------
+# Dismissals, extras and fielding
+# ---------------------------------------------------------------------------
+DISMISSAL_WEIGHTS = {"caught": 0.52, "bowled": 0.20, "lbw": 0.14, "run out": 0.06, "stumped": 0.08}
+EXTRA_RATES = {"wide": 0.035, "no_ball": 0.012, "bye": 0.02}
+
+
+def pick_dismissal(weights: dict | None = None, has_keeper: bool = True, rng=random.random) -> str:
+    """How a wicket fell. Stumpings need a wicketkeeper in the fielding XI."""
+    weights = dict(weights or DISMISSAL_WEIGHTS)
+    if not has_keeper and "stumped" in weights:
+        weights["caught"] = weights.get("caught", 0) + weights.pop("stumped")
+    total = sum(weights.values())
+    roll = rng() * total
+    cumulative = 0.0
+    last = next(iter(weights))
+    for kind, weight in weights.items():
+        cumulative += weight
+        last = kind
+        if roll < cumulative:
+            return kind
+    return last
+
+
+def roll_extra(rates: dict | None = None, rng=random.random) -> str | None:
+    """Return "wide", "no_ball", "bye" or None for a normal delivery."""
+    rates = rates or EXTRA_RATES
+    roll = rng()
+    cumulative = 0.0
+    for kind in ("wide", "no_ball", "bye"):
+        cumulative += rates.get(kind, 0.0)
+        if roll < cumulative:
+            return kind
+    return None
 
 
 def simulate_ball(match, batting_style, bowling_style, pitch_modifiers=None, rng=random.random) -> dict:
